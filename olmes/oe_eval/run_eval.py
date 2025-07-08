@@ -90,6 +90,12 @@ add_arg(
     help="Override model path for local model loading",
 )
 _parser.add_argument(
+    "--massive_serve_api",
+    type=str,
+    default=None,
+    help="URL of massive-serve backend (e.g., http://192.222.59.156:30888/search)"
+)
+_parser.add_argument(
     "--model-args",
     type=str,
     default=None,
@@ -424,11 +430,13 @@ def process_eval_args(args_dict: dict) -> dict:
 
     if args_dict:
         raise ValueError(f"Unrecognized arguments: {args_dict}")
+    massive_serve_api = args_dict.pop("massive_serve_api", None)
     eval_config = {
         "model_config": model_config,
         "tasks_config": task_configs,
         "compute_config": compute_config,
-        "retrieval_config": retrieval_config
+        "retrieval_config": retrieval_config,
+        "massive_serve_api": massive_serve_api
     }
     return eval_config
 
@@ -545,11 +553,27 @@ def run_eval(args_dict: dict):
     retrieval_config = eval_config["retrieval_config"]
     
     # Setup retrieval
+    # offline_retrieval = None
+    # if retrieval_config is not None and retrieval_config['offline_retrieval_config']:
+    #     offline_retrieval = OfflineRetrieval(
+    #             retrieval_config=retrieval_config['offline_retrieval_config'],
+    #             k=retrieval_config['k'])
+
     offline_retrieval = None
-    if retrieval_config is not None and retrieval_config['offline_retrieval_config']:
+    serve_retrieval = None
+
+    if eval_config.get("massive_serve_api"):
+        from modules.retriever.massive_serve import MassiveServeRetriever
+        serve_retrieval = MassiveServeRetriever(
+            api_url=eval_config["massive_serve_api"],
+            k=retrieval_config["k"] if retrieval_config else 3
+        )
+    elif retrieval_config is not None and retrieval_config['offline_retrieval_config']:
         offline_retrieval = OfflineRetrieval(
-                retrieval_config=retrieval_config['offline_retrieval_config'],
-                k=retrieval_config['k'])
+            retrieval_config=retrieval_config['offline_retrieval_config'],
+            k=retrieval_config['k']
+        )
+
 
     task_objects = [
         load_task(task_config, compute_config["output_dir"]) for task_config in tasks_config
@@ -674,7 +698,12 @@ def run_eval(args_dict: dict):
             task._instances = task_instances
         else:
             # Load in offline retriever (TODO: online retriever)
-            task.build_all_requests(offline_retriever=offline_retrieval, llm_only=retrieval_config is not None and retrieval_config['llm_only'])
+            # task.build_all_requests(offline_retriever=offline_retrieval, llm_only=retrieval_config is not None and retrieval_config['llm_only'])
+            task.build_all_requests(
+                offline_retriever=offline_retrieval,
+                serve_retriever=serve_retrieval,
+                llm_only=retrieval_config is not None and retrieval_config.get('llm_only', False)
+            )
             task_instances = task._instances if task._instances is not None else []
             eval_requests_raw = [ins.to_dict() for ins in task_instances]
         logger.info(f"Number of requests: {len(eval_requests_raw)}")

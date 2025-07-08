@@ -328,6 +328,10 @@ class Task(abc.ABC):
         pass
 
     def build_all_requests(self, limit=None, **kwargs) -> None:
+        offline_retriever = kwargs.get('offline_retriever', None)
+        serve_retriever = kwargs.get('serve_retriever', None)
+        llm_only = kwargs.get('llm_only', False)
+
         """From task dataset, build all request instances for the task that get sent to the model"""
         instances = []
 
@@ -339,9 +343,19 @@ class Task(abc.ABC):
             random_subsample_seed=self.task_config.get("random_subsample_seed", 1234),
         )
 
-        offline_retriever = kwargs.get('offline_retriever', None)
-        if offline_retriever is not None:
-            docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
+
+        # if offline_retriever is not None:
+        #     docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
+
+        if serve_retriever is not None:
+            # No need to filter for serve_retriever — it will be called per doc
+            pass
+        elif offline_retriever is not None:
+            docs = [
+                d for d in docs
+                if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc
+            ]
+
 
         for doc_id, doc in enumerate(docs):
             fewshot_seed = self.task_config.get("fewshot_seed", 1234)
@@ -364,7 +378,8 @@ class Task(abc.ABC):
                     "fewshot_as_multiturn", False
                 ),
                 retrieval_prefix=self.task_config["context_kwargs"].get("retrieval_prefix"),
-                offline_retriever=offline_retriever if not kwargs.get('llm_only') else None
+                offline_retriever=offline_retriever if not kwargs.get('llm_only') else None,
+                serve_retriever=serve_retriever if not llm_only else None
             )
             if ctx is None:
                 continue
@@ -395,6 +410,7 @@ class Task(abc.ABC):
         fewshot_as_multiturn: bool = False,
         retrieval_prefix: Optional[str] = None,
         offline_retriever: OfflineRetrieval = None,
+        serve_retriever=None
     ) -> Union[str, list, dict]:
         """Returns a fewshot context string that is made up of a prepended description
         (if provided), the `num_fewshot` number of examples, and an appended prompt example.
@@ -445,17 +461,39 @@ class Task(abc.ABC):
             retrieval_prefix = ""
 
         # Find the retrieved passage
-        if offline_retriever is not None:
-            ctxs = offline_retriever.retrieve_single(doc, key=f"{self.task_config['metadata']['alias']}:{doc[self.task_config.get('native_id_field', 'id')]}")
+        # if offline_retriever is not None:
+        #     ctxs = offline_retriever.retrieve_single(doc, key=f"{self.task_config['metadata']['alias']}:{doc[self.task_config.get('native_id_field', 'id')]}")
+        #     assert ctxs is not None
+        #     if "{query}" not in description:
+        #         retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(ctxs)
+        #     else:
+        #         assert "{documents}" in description
+        #         description = description.replace("{query}", doc["question"]).replace("{documents}", self._prepare_retrieved_passages(ctxs))
+        #         retrieval_text = ""
+        # else:
+        #     retrieval_text = "" 
+        retrieval_text = ""
+
+        if serve_retriever is not None:
+            query = doc["question"] if "question" in doc else self.doc_to_text(doc)
+            try:
+                ctxs = serve_retriever.retrieve(query)
+                retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(ctxs)
+            except Exception as e:
+                logger.warning(f"Serve retriever failed for query: {query}, error: {e}")
+        elif offline_retriever is not None:
+            ctxs = offline_retriever.retrieve_single(
+                doc, key=f"{self.task_config['metadata']['alias']}:{doc[self.task_config.get('native_id_field', 'id')]}"
+            )
             assert ctxs is not None
             if "{query}" not in description:
                 retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(ctxs)
             else:
                 assert "{documents}" in description
-                description = description.replace("{query}", doc["question"]).replace("{documents}", self._prepare_retrieved_passages(ctxs))
-                retrieval_text = ""
-        else:
-            retrieval_text = "" 
+                description = description.replace("{query}", doc["question"]).replace(
+                    "{documents}", self._prepare_retrieved_passages(ctxs)
+                )
+
 
         if use_chat_format:
             messages = []
