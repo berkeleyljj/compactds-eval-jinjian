@@ -6,7 +6,7 @@ import re
 from abc import abstractmethod
 from copy import deepcopy
 from typing import Iterable, List, Optional, Sequence, Union, cast
-
+import json
 import datasets
 
 from oe_eval.components.instances import RequestInstance
@@ -478,7 +478,8 @@ class Task(abc.ABC):
             query = doc["question"] if "question" in doc else self.doc_to_text(doc)
             try:
                 ctxs = serve_retriever.retrieve(query)
-                retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(ctxs)
+                texts = [p["text"] for p in ctxs["results"]["passages"]]
+                retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(texts)
             except Exception as e:
                 logger.warning(f"Serve retriever failed for query: {query}, error: {e}")
         elif offline_retriever is not None:

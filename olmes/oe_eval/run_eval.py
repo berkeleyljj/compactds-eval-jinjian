@@ -10,6 +10,8 @@ import time
 from collections import defaultdict
 from typing import Optional
 from pathlib import Path
+import sys
+sys.path.insert(0, "/home/ubuntu/Jinjian/compactds-eval")
 
 from lm_eval.api.model import TemplateLM
 
@@ -328,9 +330,9 @@ def process_eval_args(args_dict: dict) -> dict:
     for key in ["retrieval_results_path", "retrieval_text_key", "ctx_key", "matching_key", "k", "rerank_k", "sources_to_keep", "sources_to_filter", "presort_key", "sort_key", "threshold"]:
         offline_retrieval_config[key] = args_dict.pop(key, None)
 
-    if offline_retrieval_config["retrieval_results_path"].startswith("s3://"):
-        download_file_from_s3(offline_retrieval_config["retrieval_results_path"], destination_file="/tmp/retrieval_results.jsonl")
-        offline_retrieval_config["retrieval_results_path"] = "/tmp/retrieval_results.jsonl"
+    # if offline_retrieval_config["retrieval_results_path"].startswith("s3://"):
+    #     download_file_from_s3(offline_retrieval_config["retrieval_results_path"], destination_file="/tmp/retrieval_results.jsonl")
+    #     offline_retrieval_config["retrieval_results_path"] = "/tmp/retrieval_results.jsonl"
 
     if retrieval_config is not None:
         retrieval_config_instance = ExperimentConfig.load(retrieval_config, drop_extra_fields=False)
@@ -422,6 +424,7 @@ def process_eval_args(args_dict: dict) -> dict:
     compute_config["save_raw_requests"] = args_dict.pop("save_raw_requests")
     compute_config["recompute_metrics"] = args_dict.pop("recompute_metrics")
     compute_config["wandb_run_path"] = args_dict.pop("wandb_run_path")
+    massive_serve_api = args_dict.pop("massive_serve_api", None)
 
     if compute_config["remote_output_dir"] is not None:
         # if a remote directory is provided, we set the output dir to a temporary directory
@@ -430,7 +433,6 @@ def process_eval_args(args_dict: dict) -> dict:
 
     if args_dict:
         raise ValueError(f"Unrecognized arguments: {args_dict}")
-    massive_serve_api = args_dict.pop("massive_serve_api", None)
     eval_config = {
         "model_config": model_config,
         "tasks_config": task_configs,
@@ -542,7 +544,9 @@ def load_task(task_config: dict, output_dir: Optional[str] = None) -> Task:
 
 
 def task_file_name(output_dir: str, task_idx: int, task_name: str, file_name: str) -> str:
-    return os.path.join(output_dir, f"task-{task_idx:03d}-{task_name}-{file_name}")
+    # return os.path.join(output_dir, f"task-{task_idx:03d}-{task_name}-{file_name}")
+    safe_task_name = task_name.replace(":", "_").replace("/", "_")
+    return os.path.join(output_dir, f"task-{task_idx:03d}-{safe_task_name}-{file_name}")
 
 
 def run_eval(args_dict: dict):
@@ -566,7 +570,7 @@ def run_eval(args_dict: dict):
         from modules.retriever.massive_serve import MassiveServeRetriever
         serve_retrieval = MassiveServeRetriever(
             api_url=eval_config["massive_serve_api"],
-            k=retrieval_config["k"] if retrieval_config else 3
+            k=retrieval_config["k"] if retrieval_config else 10
         )
     elif retrieval_config is not None and retrieval_config['offline_retrieval_config']:
         offline_retrieval = OfflineRetrieval(
