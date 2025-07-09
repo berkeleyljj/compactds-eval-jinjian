@@ -647,11 +647,26 @@ class MultipleChoiceTask(Task):
         )
 
         offline_retriever = kwargs.get('offline_retriever', None)
-        if offline_retriever is not None:
-            # print(list(offline_retriever.query_to_doc.keys())[0])
-            # print(len(offline_retriever.query_to_doc.keys()))
-            # assert False
-            docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
+        serve_retriever = kwargs.get('serve_retriever', None)
+        llm_only = kwargs.get('llm_only', False)
+
+
+        # offline_retriever = kwargs.get('offline_retriever', None)
+        # if offline_retriever is not None:
+        #     # print(list(offline_retriever.query_to_doc.keys())[0])
+        #     # print(len(offline_retriever.query_to_doc.keys()))
+        #     # assert False
+        #     docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
+
+        if serve_retriever is not None:
+            # No need to filter for serve_retriever — it will be called per doc
+            pass
+        elif offline_retriever is not None:
+            docs = [
+                d for d in docs
+                if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc
+            ]
+
 
         for doc_id, doc in enumerate(docs):
             fewshot_seed = self.task_config.get("fewshot_seed", 1234)
@@ -674,7 +689,8 @@ class MultipleChoiceTask(Task):
                     "fewshot_as_multiturn", False
                 ),
                 retrieval_prefix=self.task_config["context_kwargs"].get("retrieval_prefix"),
-                offline_retriever=offline_retriever if not kwargs.get('llm_only') else None
+                offline_retriever=offline_retriever if not kwargs.get('llm_only') else None,
+                serve_retriever=serve_retriever if not llm_only else None
             )
             if ctx is None:
                 continue

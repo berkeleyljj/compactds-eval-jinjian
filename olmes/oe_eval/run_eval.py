@@ -84,12 +84,20 @@ add_arg(_parser, "revision", MODEL_DEFAULTS, type=str, help="Revision of model i
 add_arg(_parser, "trust-remote-code", MODEL_DEFAULTS, type=bool, help="Trust remote code in HF hub")
 add_arg(_parser, "max-length", MODEL_DEFAULTS, type=int, help="Max length of model input")
 add_arg(_parser, "model-type", MODEL_DEFAULTS, type=str, help="Model type (e.g., 'hf' or 'vllm')")
+# add_arg(_parser, "exact_search", MODEL_DEFAULTS, type=bool)
+add_arg(_parser, "n_probe", MODEL_DEFAULTS, type=int)
 add_arg(
     _parser,
     "model-path",
     MODEL_DEFAULTS,
     type=str,
     help="Override model path for local model loading",
+)
+_parser.add_argument(
+    "--exact_search",
+    type=bool,
+    default=False,
+    help="Whether or not to use exact search"
 )
 _parser.add_argument(
     "--massive_serve_api",
@@ -425,6 +433,8 @@ def process_eval_args(args_dict: dict) -> dict:
     compute_config["recompute_metrics"] = args_dict.pop("recompute_metrics")
     compute_config["wandb_run_path"] = args_dict.pop("wandb_run_path")
     massive_serve_api = args_dict.pop("massive_serve_api", None)
+    exact_search = args_dict.pop("exact_search", False)
+    n_probe = args_dict.pop("n_probe", None)
 
     if compute_config["remote_output_dir"] is not None:
         # if a remote directory is provided, we set the output dir to a temporary directory
@@ -438,7 +448,9 @@ def process_eval_args(args_dict: dict) -> dict:
         "tasks_config": task_configs,
         "compute_config": compute_config,
         "retrieval_config": retrieval_config,
-        "massive_serve_api": massive_serve_api
+        "massive_serve_api": massive_serve_api,
+        "exact_search": exact_search,
+        "n_probe": n_probe
     }
     return eval_config
 
@@ -565,12 +577,17 @@ def run_eval(args_dict: dict):
 
     offline_retrieval = None
     serve_retrieval = None
+    exact_search = eval_config.get("exact_search", False)
+    n_probe = eval_config.get("n_probe", None)
+    print(f"Exact search is set to {exact_search}")
 
     if eval_config.get("massive_serve_api"):
         from modules.retriever.massive_serve import MassiveServeRetriever
         serve_retrieval = MassiveServeRetriever(
             api_url=eval_config["massive_serve_api"],
-            k=retrieval_config["k"] if retrieval_config else 10
+            k=retrieval_config["k"] if retrieval_config else 10,
+            use_rerank = exact_search,
+            n_probe = n_probe
         )
     elif retrieval_config is not None and retrieval_config['offline_retrieval_config']:
         offline_retrieval = OfflineRetrieval(

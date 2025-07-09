@@ -4,12 +4,15 @@ import requests
 import json
 
 class MassiveServeRetriever:
-    def __init__(self, api_url, k=10):
+    def __init__(self, api_url, k=10, use_rerank=False, n_probe=None):
         self.api_url = api_url
         self.k = k
+        self.use_rerank = use_rerank
+        self.n_probe = n_probe
 
     def retrieve(self, query):
-        response = requests.post(self.api_url, json={"query": query, "n_docs": self.k})
+        print(f"At API calling n_probe is set to {self.n_probe}")
+        response = requests.post(self.api_url, json={"query": query, "n_docs": self.k, "use_rerank": self.use_rerank, "nprobe": self.n_probe})
         response.raise_for_status()
 
         result = response.json()
