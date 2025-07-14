@@ -347,9 +347,35 @@ class Task(abc.ABC):
         # if offline_retriever is not None:
         #     docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
 
-        if serve_retriever is not None:
-            # No need to filter for serve_retriever — it will be called per doc
-            pass
+        # Inject batch call to backend retriever if applicable
+        if serve_retriever is not None and hasattr(serve_retriever, "retrieve_batch"):
+            queries = [self.doc_to_text(doc) for doc in docs]
+            print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in batches of {serve_retriever.retrieval_batch_size}")
+            all_results = {}
+            batch_size = serve_retriever.retrieval_batch_size
+
+            for i in range(0, len(queries), batch_size):
+                batch = queries[i:i + batch_size]
+                try:
+                    response = serve_retriever.retrieve_batch(batch)
+                    passages_list = response["results"]["passages"]
+                    for q, result in zip(batch, passages_list):
+                        print(f"[DEBUG] query: {q[:60]}...")
+                        if isinstance(result, dict) and "passages" in result:
+                            passages = result["passages"]
+                            print(f"[DEBUG] raw passages: {passages} ({type(passages)})")
+                            all_results[q] = {"results": {"passages": passages}}
+                        else:
+                            print(f"[ERROR] Malformed result: {result}")
+                            all_results[q] = {"results": {"passages": []}}
+
+                except Exception as e:
+                    logger.warning(f"[Batch Retrieval Failed on batch {i // batch_size}] {e}")
+                    serve_retriever.batched_results = None
+                    break
+            else:
+                serve_retriever.batched_results = all_results
+
         elif offline_retriever is not None:
             docs = [
                 d for d in docs
@@ -475,13 +501,28 @@ class Task(abc.ABC):
         retrieval_text = ""
 
         if serve_retriever is not None:
-            query = doc["question"] if "question" in doc else self.doc_to_text(doc)
-            try:
-                ctxs = serve_retriever.retrieve(query)
-                texts = [p["text"] for p in ctxs["results"]["passages"]]
-                retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(texts)
-            except Exception as e:
-                logger.warning(f"Serve retriever failed for query: {query}, error: {e}")
+            query = self.doc_to_text(doc)
+            if getattr(serve_retriever, "retrieval_batch_size", 1) > 1:
+                if serve_retriever.batched_results is None:
+                    raise ValueError("Batched results not populated before fewshot_context()")
+                if query not in serve_retriever.batched_results:
+                    raise ValueError(f"Batched result missing for query: {query}")
+                ctxs = serve_retriever.batched_results[query]
+                print(f"\n[DEBUG] ctxs type: {type(ctxs)}")
+                print(f"[DEBUG] ctxs: {ctxs}")
+                if isinstance(ctxs, dict):
+                    print(f"[DEBUG] ctxs keys: {list(ctxs.keys())}\n")
+
+            else:
+                try:
+                    ctxs = serve_retriever.retrieve(query)
+                except Exception as e:
+                    logger.warning(f"Serve retriever failed for query: {query}, error: {e}")
+                    raise
+
+
+            texts = [p["text"] for p in ctxs["results"]["passages"]]
+            retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(texts)
         elif offline_retriever is not None:
             ctxs = offline_retriever.retrieve_single(
                 doc, key=f"{self.task_config['metadata']['alias']}:{doc[self.task_config.get('native_id_field', 'id')]}"
@@ -649,18 +690,30 @@ class MultipleChoiceTask(Task):
         offline_retriever = kwargs.get('offline_retriever', None)
         serve_retriever = kwargs.get('serve_retriever', None)
         llm_only = kwargs.get('llm_only', False)
+        if serve_retriever is not None and hasattr(serve_retriever, "retrieve_batch"):
+            queries = [self.doc_to_text(doc) for doc in docs]
+            print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in batches of {serve_retriever.retrieval_batch_size}")
+            
+            all_results = {}
+            batch_size = serve_retriever.retrieval_batch_size
+
+            for i in range(0, len(queries), batch_size):
+                batch = queries[i:i + batch_size]
+                try:
+                    passages_list = serve_retriever.retrieve_batch(batch)["results"]["passages"]
+                    print(f"[DEBUG] passage list length is {len(passages_list)}")
+                    for q, passages in zip(batch, passages_list):
+                        print(f"[DEBUG] query: {q[:30]}... |length of passages: {len(passages)}")
+                        all_results[q] = {"results": {"passages": passages}}
+
+                except Exception as e:
+                    logger.warning(f"[Batch Retrieval Failed on batch {i // batch_size}] {e}")
+                    serve_retriever.batched_results = None
+                    break
+            else:
+                serve_retriever.batched_results = all_results
 
 
-        # offline_retriever = kwargs.get('offline_retriever', None)
-        # if offline_retriever is not None:
-        #     # print(list(offline_retriever.query_to_doc.keys())[0])
-        #     # print(len(offline_retriever.query_to_doc.keys()))
-        #     # assert False
-        #     docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
-
-        if serve_retriever is not None:
-            # No need to filter for serve_retriever — it will be called per doc
-            pass
         elif offline_retriever is not None:
             docs = [
                 d for d in docs

@@ -1,0 +1,9 @@
+{
+    "AGI Eval": 0.5675,
+    "GPQA": 0.32142857142857145,
+    "GPQA:Biology": 0.5,
+    "GPQA:Physics": 0.29411764705882354,
+    "GPQA:Chemistry": 0.273224043715847,
+    "Average w/o subcat": 0.44446428571428576,
+    "Average with subcat": 0.40871042269366764
+}

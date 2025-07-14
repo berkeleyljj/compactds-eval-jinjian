@@ -1,14 +1,16 @@
 {
+    "MMLU": 0.7196491228070178,
     "MMLU:STEM": 0.635,
-    "MMLU:social sciences": 0.764,
-    "MMLU:humanities": 0.7316666666666668,
-    "MMLU:other": 0.7638461538461538,
+    "MMLU:social sciences": 0.7866666666666666,
+    "MMLU:humanities": 0.7400000000000001,
+    "MMLU:other": 0.7521428571428571,
+    "MMLU Pro": 0.475,
     "AGI Eval": 0.55875,
     "GPQA": 0.33035714285714285,
     "GPQA:Biology": 0.4230769230769231,
     "GPQA:Physics": 0.3048128342245989,
     "GPQA:Chemistry": 0.31693989071038253,
     "Minerva Math": 0.49857142857142855,
-    "Average w/o subcat": 0.46255952380952375,
-    "Average with subcat": 0.5551848774551281
+    "Average w/o subcat": 0.5164655388471179,
+    "Average with subcat": 0.5490960600392857
 }

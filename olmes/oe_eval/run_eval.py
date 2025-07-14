@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, "/home/ubuntu/Jinjian/compactds-eval")
 
 from lm_eval.api.model import TemplateLM
-
+from math import ceil
 from oe_eval.components.instances import RequestInstance
 from oe_eval.default_configs import MODEL_DEFAULTS, TASK_DEFAULTS
 from oe_eval.models.eleuther_huggingface import HFLM_Verbose
@@ -162,6 +162,11 @@ _parser.add_argument(
 )
 
 _parser.add_argument(
+    "--retrieval_batch_size", type=int, default=1,
+    help="Batch size for query retrieval (default: 1 means no batching)"
+)
+
+_parser.add_argument(
     "--presort_key", 
     type=str,
     help="Preliminary scoring key to first-stage sort retrieval contexts", 
@@ -287,25 +292,55 @@ def convert_chat_instance(model, ins, chat_template=None):
             ins.request.continuation = ins.request.continuation.lstrip()
     return ins
 
+# Old
+# def evaluate(model, instances, batch_size=1):
+#     instances_types = defaultdict(list)
 
-def evaluate(model, instances):
+#     for ins in instances:
+#         instances_types[ins.request_type].append(ins)
+
+#     results_for_requests = []
+#     if len(instances_types["loglikelihood"]) > 0:
+#         requests_logll = [ins.request for ins in instances_types["loglikelihood"]]
+#         output = model.loglikelihood_verbose(requests=requests_logll)
+#         results_for_requests += collate_results(instances_types["loglikelihood"], output)
+
+#     if len(instances_types["generate_until"]) > 0:
+#         requests_generate = [ins.request for ins in instances_types["generate_until"]]
+#         output = model.generate_until_verbose(requests=requests_generate)
+#         results_for_requests += collate_results(instances_types["generate_until"], output)
+
+#     return results_for_requests
+
+def evaluate(model, instances, batch_size):
+
     instances_types = defaultdict(list)
 
     for ins in instances:
         instances_types[ins.request_type].append(ins)
 
     results_for_requests = []
-    if len(instances_types["loglikelihood"]) > 0:
-        requests_logll = [ins.request for ins in instances_types["loglikelihood"]]
-        output = model.loglikelihood_verbose(requests=requests_logll)
-        results_for_requests += collate_results(instances_types["loglikelihood"], output)
 
+    # Handle loglikelihood requests in batches
+    if len(instances_types["loglikelihood"]) > 0:
+        ll_instances = instances_types["loglikelihood"]
+        for i in range(0, len(ll_instances), batch_size):
+            batch = ll_instances[i:i + batch_size]
+            requests_logll = [ins.request for ins in batch]
+            output = model.loglikelihood_verbose(requests=requests_logll)
+            results_for_requests += collate_results(batch, output)
+
+    # Handle generate_until requests in batches
     if len(instances_types["generate_until"]) > 0:
-        requests_generate = [ins.request for ins in instances_types["generate_until"]]
-        output = model.generate_until_verbose(requests=requests_generate)
-        results_for_requests += collate_results(instances_types["generate_until"], output)
+        gen_instances = instances_types["generate_until"]
+        for i in range(0, len(gen_instances), batch_size):
+            batch = gen_instances[i:i + batch_size]
+            requests_generate = [ins.request for ins in batch]
+            output = model.generate_until_verbose(requests=requests_generate)
+            results_for_requests += collate_results(batch, output)
 
     return results_for_requests
+
 
 
 def process_eval_args(args_dict: dict) -> dict:
@@ -432,7 +467,9 @@ def process_eval_args(args_dict: dict) -> dict:
     compute_config["save_raw_requests"] = args_dict.pop("save_raw_requests")
     compute_config["recompute_metrics"] = args_dict.pop("recompute_metrics")
     compute_config["wandb_run_path"] = args_dict.pop("wandb_run_path")
+
     massive_serve_api = args_dict.pop("massive_serve_api", None)
+    retrieval_batch_size = args_dict.pop("retrieval_batch_size", 1)
     exact_search = args_dict.pop("exact_search", False)
     n_probe = args_dict.pop("n_probe", None)
 
@@ -450,7 +487,8 @@ def process_eval_args(args_dict: dict) -> dict:
         "retrieval_config": retrieval_config,
         "massive_serve_api": massive_serve_api,
         "exact_search": exact_search,
-        "n_probe": n_probe
+        "n_probe": n_probe,
+        "retrieval_batch_size": retrieval_batch_size
     }
     return eval_config
 
@@ -587,7 +625,8 @@ def run_eval(args_dict: dict):
             api_url=eval_config["massive_serve_api"],
             k=retrieval_config["k"] if retrieval_config else 10,
             use_rerank = exact_search,
-            n_probe = n_probe
+            n_probe = n_probe,
+            retrieval_batch_size = eval_config["retrieval_batch_size"]
         )
     elif retrieval_config is not None and retrieval_config['offline_retrieval_config']:
         offline_retrieval = OfflineRetrieval(
@@ -798,7 +837,9 @@ def run_eval(args_dict: dict):
             logger.info("\n".join(show_model_input(first_requests)))
             # TODO: Make sure these are in the right order when mixing loglikelihood and generate_until
             logger.info(f"First inputs: {task._instances[0]}")
-            results_for_requests = evaluate(model=eval_model, instances=task._instances)
+            # results_for_requests = evaluate(model=eval_model, instances=task._instances)
+            results_for_requests = evaluate(model=eval_model, instances=task._instances, batch_size=int(compute_config["batch_size"]))
+
             logger.info(f"First results: {results_for_requests[0]}")
 
         # Post-process generation results for metrics
