@@ -42,5 +42,5 @@ for i in "${!TASKS[@]}"; do
         --exact_search True \
         --n_probe $N_PROBE \
         --retrieval_batch_size 20 \
-        --batch-size 5
+        --batch-size 10
 done
