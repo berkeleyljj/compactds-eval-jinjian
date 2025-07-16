@@ -234,8 +234,7 @@ _parser.add_argument(
 _parser.add_argument(
     "--batch-size",
     type=str,
-    default=1,
-    help="batch size of requests for model processing (can be 'auto')",
+    default=1
 )
 _parser.add_argument(
     "--max-batch-size", type=int, default=32, help="Max batch size of to try for auto batch-size"
@@ -292,8 +291,8 @@ def convert_chat_instance(model, ins, chat_template=None):
             ins.request.continuation = ins.request.continuation.lstrip()
     return ins
 
-# Old
-# def evaluate(model, instances, batch_size=1):
+
+# def evaluate(model, instances):
 #     instances_types = defaultdict(list)
 
 #     for ins in instances:
@@ -837,7 +836,7 @@ def run_eval(args_dict: dict):
             logger.info("\n".join(show_model_input(first_requests)))
             # TODO: Make sure these are in the right order when mixing loglikelihood and generate_until
             logger.info(f"First inputs: {task._instances[0]}")
-            # results_for_requests = evaluate(model=eval_model, instances=task._instances)
+            #results_for_requests = evaluate(model=eval_model, instances=task._instances)
             results_for_requests = evaluate(model=eval_model, instances=task._instances, batch_size=int(compute_config["batch_size"]))
 
             logger.info(f"First results: {results_for_requests[0]}")

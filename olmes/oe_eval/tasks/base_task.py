@@ -343,11 +343,6 @@ class Task(abc.ABC):
             random_subsample_seed=self.task_config.get("random_subsample_seed", 1234),
         )
 
-
-        # if offline_retriever is not None:
-        #     docs = [d for d in docs if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc]
-
-        # Inject batch call to backend retriever if applicable
         if serve_retriever is not None and hasattr(serve_retriever, "retrieve_batch"):
             queries = [self.doc_to_text(doc) for doc in docs]
             print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in batches of {serve_retriever.retrieval_batch_size}")
@@ -509,7 +504,7 @@ class Task(abc.ABC):
                     raise ValueError(f"Batched result missing for query: {query}")
                 ctxs = serve_retriever.batched_results[query]
                 print(f"\n[DEBUG] ctxs type: {type(ctxs)}")
-                print(f"[DEBUG] ctxs: {ctxs}")
+                # print(f"[DEBUG] ctxs: {ctxs}")
                 if isinstance(ctxs, dict):
                     print(f"[DEBUG] ctxs keys: {list(ctxs.keys())}\n")
 

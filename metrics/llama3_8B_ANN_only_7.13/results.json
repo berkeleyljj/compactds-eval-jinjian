@@ -1,4 +1,5 @@
 {
-    "Average w/o subcat": NaN,
-    "Average with subcat": NaN
+    "AGI Eval": 0.56,
+    "Average w/o subcat": 0.56,
+    "Average with subcat": 0.56
 }

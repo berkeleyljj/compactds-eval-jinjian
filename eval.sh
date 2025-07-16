@@ -15,21 +15,7 @@ declare -a TASKS=("agi_eval_english::retrieval")
 for i in "${!TASKS[@]}"; do
     TASK="${TASKS[$i]}"
 
-    echo "Running $TASK with ANN-only"
-    python olmes/oe_eval/run_eval.py \
-        --task "$TASK" \
-        --model "$MODEL" \
-        --model-type "$MODEL_TYPE" \
-        --model-args "$MODEL_ARGS" \
-        --k $n_docs \
-        --massive_serve_api "$API_URL" \
-        --save-raw-requests $SAVE_RAW \
-        --output-dir "output/llama3_8B_ANN_only_7.13" \
-        --n_probe $N_PROBE \
-        --retrieval_batch_size 2 
-        # --batch-size 5
-
-    # echo "Running $TASK with exact search"
+    # echo "Running $TASK with ANN-only"
     # python olmes/oe_eval/run_eval.py \
     #     --task "$TASK" \
     #     --model "$MODEL" \
@@ -38,8 +24,23 @@ for i in "${!TASKS[@]}"; do
     #     --k $n_docs \
     #     --massive_serve_api "$API_URL" \
     #     --save-raw-requests $SAVE_RAW \
-    #     --output-dir "output/llama3_8B_exact_search_7.13" \
-    #     --exact_search True \
+    #     --output-dir "output/llama3_8B_ANN_only_7.13" \
     #     --n_probe $N_PROBE \
-    #     --batch-size 5
+    #     --retrieval_batch_size 20 \
+    #     --batch-size 10
+
+    echo "Running $TASK with exact search"
+    python olmes/oe_eval/run_eval.py \
+        --task "$TASK" \
+        --model "$MODEL" \
+        --model-type "$MODEL_TYPE" \
+        --model-args "$MODEL_ARGS" \
+        --k $n_docs \
+        --massive_serve_api "$API_URL" \
+        --save-raw-requests $SAVE_RAW \
+        --output-dir "output/llama3_8B_exact_search_7.13" \
+        --exact_search True \
+        --n_probe $N_PROBE \
+        --retrieval_batch_size 20 \
+        --batch-size 5
 done
