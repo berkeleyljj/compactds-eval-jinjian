@@ -29,21 +29,34 @@ class MassiveServeRetriever:
 
     def retrieve_batch(self, queries):
         print(f"[Retriever] Using batched retrieval with batch size = {self.retrieval_batch_size} to api url {self.api_url}")
-        response = requests.post(
-            self.api_url,
-            json={
-                "queries": queries,
-                "n_docs": self.k,
-                "use_rerank": self.use_rerank,
-                "nprobe": self.n_probe,
-            },
-        )
-        response.raise_for_status()
-        json_response = response.json()
+        all_passages = []
 
-        results = json_response.get("results", {})
-        # print(results)
-        passages = results.get("passages", [])
-        print(f"[DEBUG] Received {len(passages)} passage groups (should match query batch size)")
+        for i in range(0, len(queries), self.retrieval_batch_size):
+            subqueries = queries[i: i + self.retrieval_batch_size]
+            try:
+                response = requests.post(
+                    self.api_url,
+                    json={
+                        "queries": subqueries,
+                        "n_docs": self.k,
+                        "use_rerank": self.use_rerank,
+                        "nprobe": self.n_probe,
+                    },
+                )
+                response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                print("[ERROR] Backend request failed")
+                print(e)
+                raise
 
-        return json_response
+            json_response = response.json()
+            results = json_response.get("results", {})
+            batch_passages = results.get("passages", [])
+            print(f"[DEBUG] Retrieved {len(batch_passages)} passages for batch of size {len(subqueries)}")
+            all_passages.extend(batch_passages)
+
+        return {
+            "results": {
+                "passages": all_passages
+            }
+        }

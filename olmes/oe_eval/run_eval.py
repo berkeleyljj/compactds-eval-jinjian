@@ -756,8 +756,6 @@ def run_eval(args_dict: dict):
             ]
             task._instances = task_instances
         else:
-            # Load in offline retriever (TODO: online retriever)
-            # task.build_all_requests(offline_retriever=offline_retrieval, llm_only=retrieval_config is not None and retrieval_config['llm_only'])
             task.build_all_requests(
                 offline_retriever=offline_retrieval,
                 serve_retriever=serve_retrieval,

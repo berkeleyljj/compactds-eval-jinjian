@@ -345,31 +345,25 @@ class Task(abc.ABC):
 
         if serve_retriever is not None and hasattr(serve_retriever, "retrieve_batch"):
             queries = [self.doc_to_text(doc) for doc in docs]
-            print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in batches of {serve_retriever.retrieval_batch_size}")
-            all_results = {}
-            batch_size = serve_retriever.retrieval_batch_size
+            print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in one batched call")
 
-            for i in range(0, len(queries), batch_size):
-                batch = queries[i:i + batch_size]
-                try:
-                    response = serve_retriever.retrieve_batch(batch)
-                    passages_list = response["results"]["passages"]
-                    for q, result in zip(batch, passages_list):
-                        print(f"[DEBUG] query: {q[:60]}...")
-                        if isinstance(result, dict) and "passages" in result:
-                            passages = result["passages"]
-                            print(f"[DEBUG] raw passages: {passages} ({type(passages)})")
-                            all_results[q] = {"results": {"passages": passages}}
-                        else:
-                            print(f"[ERROR] Malformed result: {result}")
-                            all_results[q] = {"results": {"passages": []}}
+            try:
+                response = serve_retriever.retrieve_batch(queries)  # full list at once
+                passages_list = response["results"]["passages"]  # list of lists
 
-                except Exception as e:
-                    logger.warning(f"[Batch Retrieval Failed on batch {i // batch_size}] {e}")
-                    serve_retriever.batched_results = None
-                    break
-            else:
+                if len(passages_list) != len(queries):
+                    raise ValueError(f"Mismatch in batch response size: got {len(passages_list)} results for {len(queries)} queries")
+
+                all_results = {
+                    q: {"results": {"passages": p}}
+                    for q, p in zip(queries, passages_list)
+                }
+
                 serve_retriever.batched_results = all_results
+
+            except Exception as e:
+                logger.warning(f"[Batch Retrieval Failed] {e}")
+                serve_retriever.batched_results = None
 
         elif offline_retriever is not None:
             docs = [
@@ -687,33 +681,32 @@ class MultipleChoiceTask(Task):
         llm_only = kwargs.get('llm_only', False)
         if serve_retriever is not None and hasattr(serve_retriever, "retrieve_batch"):
             queries = [self.doc_to_text(doc) for doc in docs]
-            print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in batches of {serve_retriever.retrieval_batch_size}")
-            
-            all_results = {}
-            batch_size = serve_retriever.retrieval_batch_size
+            print(f"[Batch Retrieval] Sending {len(queries)} queries to backend in one batched call")
 
-            for i in range(0, len(queries), batch_size):
-                batch = queries[i:i + batch_size]
-                try:
-                    passages_list = serve_retriever.retrieve_batch(batch)["results"]["passages"]
-                    print(f"[DEBUG] passage list length is {len(passages_list)}")
-                    for q, passages in zip(batch, passages_list):
-                        print(f"[DEBUG] query: {q[:30]}... |length of passages: {len(passages)}")
-                        all_results[q] = {"results": {"passages": passages}}
+            try:
+                response = serve_retriever.retrieve_batch(queries)  # full list at once
+                passages_list = response["results"]["passages"]  # list of lists
 
-                except Exception as e:
-                    logger.warning(f"[Batch Retrieval Failed on batch {i // batch_size}] {e}")
-                    serve_retriever.batched_results = None
-                    break
-            else:
+                if len(passages_list) != len(queries):
+                    raise ValueError(f"Mismatch in batch response size: got {len(passages_list)} results for {len(queries)} queries")
+
+                all_results = {
+                    q: {"results": {"passages": p}}
+                    for q, p in zip(queries, passages_list)
+                }
+
                 serve_retriever.batched_results = all_results
 
+            except Exception as e:
+                logger.warning(f"[Batch Retrieval Failed] {e}")
+                serve_retriever.batched_results = None
 
         elif offline_retriever is not None:
             docs = [
                 d for d in docs
                 if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc
             ]
+
 
 
         for doc_id, doc in enumerate(docs):
