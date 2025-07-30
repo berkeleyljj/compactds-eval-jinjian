@@ -10,26 +10,11 @@ N_PROBE=256
 SAVE_RAW=true
 
 # Dataset list
-declare -a TASKS=("agi_eval_english::retrieval")
+declare -a TASKS=("gpqa:0shot_cot::retrieval")
 
 for i in "${!TASKS[@]}"; do
     TASK="${TASKS[$i]}"
-
-    # echo "Running $TASK with ANN-only"
-    # python olmes/oe_eval/run_eval.py \
-    #     --task "$TASK" \
-    #     --model "$MODEL" \
-    #     --model-type "$MODEL_TYPE" \
-    #     --model-args "$MODEL_ARGS" \
-    #     --k $n_docs \
-    #     --massive_serve_api "$API_URL" \
-    #     --save-raw-requests $SAVE_RAW \
-    #     --output-dir "output/llama3_8B_ANN_only_7.13" \
-    #     --n_probe $N_PROBE \
-    #     --retrieval_batch_size 20 \
-    #     --batch-size 10
-
-    echo "Running $TASK with exact search"
+    echo "Running $TASK with exact search and diversity search"
     python olmes/oe_eval/run_eval.py \
         --task "$TASK" \
         --model "$MODEL" \
@@ -38,7 +23,7 @@ for i in "${!TASKS[@]}"; do
         --k $n_docs \
         --massive_serve_api "$API_URL" \
         --save-raw-requests $SAVE_RAW \
-        --output-dir "output/llama3_8B_exact_search_7.13" \
+        --output-dir "output/llama3_8B_exact_search_7.29" \
         --exact_search True \
         --n_probe $N_PROBE \
         --retrieval_batch_size 20 \

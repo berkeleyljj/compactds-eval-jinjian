@@ -40,6 +40,7 @@ class MassiveServeRetriever:
                         "queries": subqueries,
                         "n_docs": self.k,
                         "use_rerank": self.use_rerank,
+                        "use_diverse": True,
                         "nprobe": self.n_probe,
                     },
                 )

@@ -2,3 +2,5 @@
 0,llama3_8B_exact_search_7.13,,,
 1,llama3_8B_exact_search_7.13_second,,,
 2,llama3_8B_exact_search_7.20,0.56875,0.56875,0.56875
+3,llama3_8B_exact_search_7.20_cached,0.5687500000000001,0.5687500000000001,0.5687500000000001
+4,llama3_8B_exact_search_7.29,0.5725,0.5725,0.5725
