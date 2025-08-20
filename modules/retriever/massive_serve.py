@@ -2,10 +2,11 @@ import requests
 import json
 
 class MassiveServeRetriever:
-    def __init__(self, api_url, k=10, use_rerank=False, n_probe=None, retrieval_batch_size=1):
+    def __init__(self, api_url, k=10, use_rerank=False, use_diverse=False, n_probe=None, retrieval_batch_size=1):
         self.api_url = api_url
         self.k = k
         self.use_rerank = use_rerank
+        self.use_diverse = use_diverse
         self.n_probe = n_probe
         self.retrieval_batch_size = retrieval_batch_size
         self.batched_results = None  # to be populated if batch retrieval is used
@@ -18,7 +19,8 @@ class MassiveServeRetriever:
                 json={
                     "query": query,
                     "n_docs": self.k,
-                    "use_rerank": self.use_rerank,
+                    "exact_search": self.use_rerank,
+                    "diverse_search": self.use_diverse,
                     "nprobe": self.n_probe,
                 },
             )
@@ -39,8 +41,8 @@ class MassiveServeRetriever:
                     json={
                         "queries": subqueries,
                         "n_docs": self.k,
-                        "use_rerank": self.use_rerank,
-                        "use_diverse": True,
+                        "exact_search": self.use_rerank,
+                        "diverse_search": self.use_diverse,
                         "nprobe": self.n_probe,
                     },
                 )

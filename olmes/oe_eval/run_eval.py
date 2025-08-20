@@ -95,9 +95,15 @@ add_arg(
 )
 _parser.add_argument(
     "--exact_search",
-    type=bool,
+    action='store_true',
     default=False,
     help="Whether or not to use exact search"
+)
+_parser.add_argument(
+    "--diverse_search",
+    action='store_true',
+    default=False,
+    help="Whether or not to use diverse search"
 )
 _parser.add_argument(
     "--massive_serve_api",
@@ -312,31 +318,62 @@ def convert_chat_instance(model, ins, chat_template=None):
 #     return results_for_requests
 
 def evaluate(model, instances, batch_size):
+    # Token-aware batching to avoid OOM while maximizing throughput.
+    # This ignores the fixed sample-count batch_size and instead packs by prompt tokens.
+
+    def _safe_token_len(req_dict):
+        try:
+            ctx = req_dict.get("context") or req_dict.get("inputs") or ""
+            return len(model.tokenizer(ctx, add_special_tokens=False).input_ids)
+        except Exception:
+            # Fallback if tokenizer errors or unexpected structure
+            return 0
+
+    def _pack_by_token_budget(reqs_with_ins, max_prompt_tokens_per_batch=24000, max_batch=520):
+        # reqs_with_ins: List[Tuple[RequestInstance, dict]]
+        enriched = []
+        for ins_obj, req in reqs_with_ins:
+            enriched.append((ins_obj, req, _safe_token_len(req)))
+        # Sort by length desc to reduce padding waste
+        enriched.sort(key=lambda x: x[2], reverse=True)
+
+        batches = []
+        cur, cur_sum = [], 0
+        for ins_obj, req, L in enriched:
+            if cur and (cur_sum + L > max_prompt_tokens_per_batch or len(cur) >= max_batch):
+                batches.append(cur)
+                cur, cur_sum = [], 0
+            cur.append((ins_obj, req))
+            cur_sum += L
+        if cur:
+            batches.append(cur)
+        return batches
 
     instances_types = defaultdict(list)
-
     for ins in instances:
         instances_types[ins.request_type].append(ins)
 
     results_for_requests = []
 
-    # Handle loglikelihood requests in batches
+    # loglikelihood with token-aware batches
     if len(instances_types["loglikelihood"]) > 0:
         ll_instances = instances_types["loglikelihood"]
-        for i in range(0, len(ll_instances), batch_size):
-            batch = ll_instances[i:i + batch_size]
-            requests_logll = [ins.request for ins in batch]
-            output = model.loglikelihood_verbose(requests=requests_logll)
-            results_for_requests += collate_results(batch, output)
+        reqs_with_ins = [(ins, ins.request) for ins in ll_instances]
+        for packed in _pack_by_token_budget(reqs_with_ins):
+            batch_ins = [p[0] for p in packed]
+            batch_reqs = [p[1] for p in packed]
+            output = model.loglikelihood_verbose(requests=batch_reqs)
+            results_for_requests += collate_results(batch_ins, output)
 
-    # Handle generate_until requests in batches
+    # generate_until with token-aware batches
     if len(instances_types["generate_until"]) > 0:
         gen_instances = instances_types["generate_until"]
-        for i in range(0, len(gen_instances), batch_size):
-            batch = gen_instances[i:i + batch_size]
-            requests_generate = [ins.request for ins in batch]
-            output = model.generate_until_verbose(requests=requests_generate)
-            results_for_requests += collate_results(batch, output)
+        reqs_with_ins = [(ins, ins.request) for ins in gen_instances]
+        for packed in _pack_by_token_budget(reqs_with_ins):
+            batch_ins = [p[0] for p in packed]
+            batch_reqs = [p[1] for p in packed]
+            output = model.generate_until_verbose(requests=batch_reqs)
+            results_for_requests += collate_results(batch_ins, output)
 
     return results_for_requests
 
@@ -470,6 +507,7 @@ def process_eval_args(args_dict: dict) -> dict:
     massive_serve_api = args_dict.pop("massive_serve_api", None)
     retrieval_batch_size = args_dict.pop("retrieval_batch_size", 1)
     exact_search = args_dict.pop("exact_search", False)
+    diverse_search = args_dict.pop("diverse_search", False)
     n_probe = args_dict.pop("n_probe", None)
 
     if compute_config["remote_output_dir"] is not None:
@@ -486,6 +524,7 @@ def process_eval_args(args_dict: dict) -> dict:
         "retrieval_config": retrieval_config,
         "massive_serve_api": massive_serve_api,
         "exact_search": exact_search,
+        "diverse_search": diverse_search,
         "n_probe": n_probe,
         "retrieval_batch_size": retrieval_batch_size
     }
@@ -615,8 +654,10 @@ def run_eval(args_dict: dict):
     offline_retrieval = None
     serve_retrieval = None
     exact_search = eval_config.get("exact_search", False)
+    diverse_search = eval_config.get("diverse_search", False)
     n_probe = eval_config.get("n_probe", None)
     print(f"Exact search is set to {exact_search}")
+    print(f"Diverse search is set to {diverse_search}")
 
     if eval_config.get("massive_serve_api"):
         from modules.retriever.massive_serve import MassiveServeRetriever
@@ -624,6 +665,7 @@ def run_eval(args_dict: dict):
             api_url=eval_config["massive_serve_api"],
             k=retrieval_config["k"] if retrieval_config else 10,
             use_rerank = exact_search,
+            use_diverse = diverse_search,
             n_probe = n_probe,
             retrieval_batch_size = eval_config["retrieval_batch_size"]
         )

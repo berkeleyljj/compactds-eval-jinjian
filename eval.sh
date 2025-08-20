@@ -3,18 +3,18 @@
 # Shared config
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 MODEL_TYPE="hf"
-MODEL_ARGS='{"max_length": 32768}'
+MODEL_ARGS='{"max_length": 16384, "torch_dtype": "bfloat16", "attn_implementation": "flash_attention_2", "low_cpu_mem_usage": true}'
 n_docs=10
-API_URL="http://192.222.59.156:30888/search"
+API_URL="http://localhost:30888/search"
 N_PROBE=256
 SAVE_RAW=true
 
 # Dataset list
-declare -a TASKS=("gpqa:0shot_cot::retrieval")
+declare -a TASKS=("agi_eval_english::retrieval")
 
 for i in "${!TASKS[@]}"; do
     TASK="${TASKS[$i]}"
-    echo "Running $TASK with exact search and diversity search"
+    echo "Running $TASK with exact_search=False and diverse_search=False (both disabled by default)"
     python olmes/oe_eval/run_eval.py \
         --task "$TASK" \
         --model "$MODEL" \
@@ -23,9 +23,7 @@ for i in "${!TASKS[@]}"; do
         --k $n_docs \
         --massive_serve_api "$API_URL" \
         --save-raw-requests $SAVE_RAW \
-        --output-dir "output/llama3_8B_exact_search_7.29" \
-        --exact_search True \
+        --output-dir "output/llama3_8B_8.19" \
         --n_probe $N_PROBE \
-        --retrieval_batch_size 20 \
-        --batch-size 10
+        --retrieval_batch_size 100
 done
