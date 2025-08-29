@@ -1,4 +1,6 @@
 import copy
+import os
+import json
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import torch
@@ -79,6 +81,16 @@ class HFLM_Verbose(HFLM):
         super().__init__(
             pretrained, device=device, dtype=dtype, device_map_option=device_map_option, **kwargs
         )
+        # For optional generation length capping and truncation logging
+        # Env overrides allow usage without runner code changes
+        env_cap = os.getenv("MAX_GEN_TOKS_CAP")
+        try:
+            self.max_gen_toks_cap: Optional[int] = int(env_cap) if env_cap is not None else None
+        except Exception:
+            self.max_gen_toks_cap = None
+        self.current_task_name: Optional[str] = os.getenv("CURRENT_TASK_NAME")
+        self.truncation_log_path: Optional[str] = os.getenv("TRUNCATION_LOG")
+        self.truncation_events: List[Dict[str, Any]] = []
 
     def loglikelihood_rolling_verbose(
         self, requests: List[Instance], disable_tqdm: bool = False
@@ -472,6 +484,12 @@ class HFLM_Verbose(HFLM):
                 max_gen_toks = kwargs.pop("max_gen_toks")
             else:
                 max_gen_toks = self.max_gen_toks
+            # Apply optional hard cap if configured (accuracy trade-off acknowledged by caller)
+            if self.max_gen_toks_cap is not None:
+                try:
+                    max_gen_toks = int(min(int(max_gen_toks), int(self.max_gen_toks_cap)))
+                except Exception:
+                    max_gen_toks = max_gen_toks
             truncate_context = kwargs.pop("truncate_context", True)
 
             # set the max length in tokens of inputs ("context_enc")
@@ -515,12 +533,14 @@ class HFLM_Verbose(HFLM):
             # perform batched generation, with args for logit scores
             kwargs["output_scores"] = True
             kwargs["return_dict_in_generate"] = True
-            output = self._model_generate(
-                context=context_enc,
-                attention_mask=attn_masks,
-                stop=until,
-                **kwargs,
-            )
+            # Accuracy-neutral: inference_mode avoids autograd state allocations
+            with torch.inference_mode():
+                output = self._model_generate(
+                    context=context_enc,
+                    attention_mask=attn_masks,
+                    stop=until,
+                    **kwargs,
+                )
             # Extract generated sequences and corresponding logits
             cont_toks_list = output["sequences"].tolist()
             gen_sequences = output["sequences"][:, context_enc.shape[1] :]
@@ -571,9 +591,30 @@ class HFLM_Verbose(HFLM):
                 res.append(res1)
                 self.cache_hook.add_partial("generate_until", (context, gen_kwargs), s)
                 pbar.update(1)
+                # Record truncation if generation length hit the cap without early stop
+                try:
+                    if len(cont_toks_no_pad) >= int(max_gen_toks) and s_raw == s:
+                        self.truncation_events.append({
+                            "task": self.current_task_name,
+                            "max_gen_toks": int(max_gen_toks),
+                            "generated_len": int(len(cont_toks_no_pad)),
+                            "context_preview": str(context)[:200],
+                        })
+                except Exception:
+                    pass
         # reorder this group of results back to original unsorted form
         res = re_ords.get_original(res)
 
         pbar.close()
+
+        # Best-effort truncation log append if configured via env
+        try:
+            if self.truncation_events and self.truncation_log_path:
+                with open(self.truncation_log_path, "a") as _fp:
+                    for _rec in self.truncation_events:
+                        _fp.write(json.dumps(_rec, ensure_ascii=False) + "\n")
+                self.truncation_events = []
+        except Exception:
+            pass
 
         return res

@@ -24,6 +24,10 @@ MODEL_DEFAULTS = {
     "chat_template": None,
     "gpu_memory_utilization": 0.9,
     "rope_scaling": None,
+    # Allow runtime speed knobs from MODEL_ARGS without breaking hashing
+    "torch_dtype": None,
+    "attn_implementation": None,
+    "low_cpu_mem_usage": None,
 }
 
 TASK_DEFAULTS = {

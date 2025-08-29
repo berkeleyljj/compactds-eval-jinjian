@@ -1,0 +1,16 @@
+{
+    "MMLU": 0.7349122807017543,
+    "MMLU:STEM": 0.6527777777777777,
+    "MMLU:social sciences": 0.8033333333333333,
+    "MMLU:humanities": 0.7546153846153847,
+    "MMLU:other": 0.7635714285714285,
+    "MMLU Pro": 0.475,
+    "AGI Eval": 0.5625,
+    "GPQA": 0.3169642857142857,
+    "GPQA:Biology": 0.44871794871794873,
+    "GPQA:Physics": 0.3155080213903743,
+    "GPQA:Chemistry": 0.26229508196721313,
+    "Minerva Math": 0.5,
+    "Average w/o subcat": 0.517875313283208,
+    "Average with subcat": 0.5538318976373461
+}

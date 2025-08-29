@@ -69,6 +69,81 @@ except ImportError:
 logger = logging.getLogger()
 
 
+def _read_proc_status_rss_mb() -> Optional[float]:
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        # VmRSS is in kB on Linux
+                        kb = float(parts[1])
+                        return kb / 1024.0
+    except Exception:
+        return None
+    return None
+
+
+def _current_rss_mb() -> Optional[float]:
+    # Try psutil if available for accurate RSS
+    try:
+        import psutil  # type: ignore
+
+        proc = psutil.Process(os.getpid())
+        return float(proc.memory_info().rss) / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    # Fallback to /proc parsing
+    mb = _read_proc_status_rss_mb()
+    if mb is not None:
+        return mb
+    # Last resort: resource maxrss (note: this is max, not current)
+    try:
+        import resource  # type: ignore
+
+        ru = resource.getrusage(resource.RUSAGE_SELF)
+        # ru_maxrss is kilobytes on Linux, bytes on macOS; normalize best-effort
+        val = float(ru.ru_maxrss)
+        if val > 10_000:  # likely kB
+            return val / 1024.0
+        else:  # likely bytes
+            return val / (1024.0 * 1024.0)
+    except Exception:
+        return None
+
+
+def _log_mem(prefix: str) -> None:
+    mb = _current_rss_mb()
+    if mb is not None:
+        print(f"[MEM] {prefix} rss_mb={mb:.1f}")
+    else:
+        print(f"[MEM] {prefix} rss_mb=unknown")
+
+
+def _log_gpu_mem(prefix: str) -> None:
+    try:
+        import torch  # type: ignore
+
+        if not torch.cuda.is_available():
+            print(f"[GPU] {prefix} cuda_unavailable")
+            return
+        num = torch.cuda.device_count()
+        lines = []
+        for d in range(num):
+            try:
+                alloc = torch.cuda.memory_allocated(d) / (1024.0 * 1024.0)
+                reserv = torch.cuda.memory_reserved(d) / (1024.0 * 1024.0)
+                max_alloc = torch.cuda.max_memory_allocated(d) / (1024.0 * 1024.0)
+                max_reserv = torch.cuda.max_memory_reserved(d) / (1024.0 * 1024.0)
+                lines.append(f"dev={d} alloc_mb={alloc:.1f} reserved_mb={reserv:.1f} max_alloc_mb={max_alloc:.1f} max_reserved_mb={max_reserv:.1f}")
+            except Exception as _e:
+                lines.append(f"dev={d} error")
+        print(f"[GPU] {prefix} | " + " | ".join(lines))
+    except Exception:
+        # torch not available or error; keep silent to avoid breaking run
+        pass
+
+
 def add_arg(parser, arg, defaults, **kwargs):
     if defaults is None:
         default = None
@@ -329,7 +404,7 @@ def evaluate(model, instances, batch_size):
             # Fallback if tokenizer errors or unexpected structure
             return 0
 
-    def _pack_by_token_budget(reqs_with_ins, max_prompt_tokens_per_batch=24000, max_batch=520):
+    def _pack_by_token_budget(reqs_with_ins, max_prompt_tokens_per_batch=20000, max_batch=100):
         # reqs_with_ins: List[Tuple[RequestInstance, dict]]
         enriched = []
         for ins_obj, req in reqs_with_ins:
@@ -349,9 +424,39 @@ def evaluate(model, instances, batch_size):
             batches.append(cur)
         return batches
 
+    _log_mem("evaluate:start")
     instances_types = defaultdict(list)
     for ins in instances:
         instances_types[ins.request_type].append(ins)
+
+    # Prompt length diagnostics (to check truncation risk)
+    try:
+        all_reqs = []
+        if len(instances_types["loglikelihood"]) > 0:
+            all_reqs.extend([ins.request for ins in instances_types["loglikelihood"]])
+        if len(instances_types["generate_until"]) > 0:
+            all_reqs.extend([ins.request for ins in instances_types["generate_until"]])
+
+        if all_reqs:
+            lengths = []
+            for req in all_reqs:
+                ctx = (req.get("context") or req.get("inputs") or "")
+                # Use add_special_tokens=False to reflect raw prompt body
+                tok_len = len(model.tokenizer(ctx, add_special_tokens=False).input_ids)
+                lengths.append(tok_len)
+            if lengths:
+                max_len = max(lengths)
+                # Best-effort read of model max length from model.config or fallback to tokenizer.model_max_length
+                model_max = getattr(getattr(model, "model", None), "config", None)
+                if model_max is not None and hasattr(model_max, "max_position_embeddings"):
+                    cap = int(model_max.max_position_embeddings)
+                else:
+                    cap = int(getattr(model.tokenizer, "model_max_length", 0) or 0)
+                eq_cap = sum(1 for L in lengths if cap and L >= cap)
+                print(f"[PROMPT LEN] num_reqs={len(lengths)} max_prompt_tokens={max_len} model_cap={cap} num_at_or_above_cap={eq_cap}")
+    except Exception as _e:
+        # Do not fail eval on diagnostics
+        pass
 
     results_for_requests = []
 
@@ -359,22 +464,49 @@ def evaluate(model, instances, batch_size):
     if len(instances_types["loglikelihood"]) > 0:
         ll_instances = instances_types["loglikelihood"]
         reqs_with_ins = [(ins, ins.request) for ins in ll_instances]
-        for packed in _pack_by_token_budget(reqs_with_ins):
+        for b_idx, packed in enumerate(_pack_by_token_budget(reqs_with_ins)):
             batch_ins = [p[0] for p in packed]
             batch_reqs = [p[1] for p in packed]
+            _log_mem(f"evaluate:loglikelihood batch={b_idx} size={len(batch_reqs)} acc_results={len(results_for_requests)}")
+            _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} before")
             output = model.loglikelihood_verbose(requests=batch_reqs)
             results_for_requests += collate_results(batch_ins, output)
+            _log_mem(f"evaluate:loglikelihood batch_done={b_idx} acc_results={len(results_for_requests)}")
+            _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after")
+            # Optional GPU cache release between batches (set OE_EVAL_GPU_EMPTY_CACHE=1)
+            try:
+                if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
+                    import torch  # type: ignore
+
+                    torch.cuda.empty_cache()
+                    _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after_empty_cache")
+            except Exception:
+                pass
 
     # generate_until with token-aware batches
     if len(instances_types["generate_until"]) > 0:
         gen_instances = instances_types["generate_until"]
         reqs_with_ins = [(ins, ins.request) for ins in gen_instances]
-        for packed in _pack_by_token_budget(reqs_with_ins):
+        for b_idx, packed in enumerate(_pack_by_token_budget(reqs_with_ins)):
             batch_ins = [p[0] for p in packed]
             batch_reqs = [p[1] for p in packed]
+            _log_mem(f"evaluate:generate_until batch={b_idx} size={len(batch_reqs)} acc_results={len(results_for_requests)}")
+            _log_gpu_mem(f"evaluate:generate_until batch={b_idx} before")
             output = model.generate_until_verbose(requests=batch_reqs)
             results_for_requests += collate_results(batch_ins, output)
+            _log_mem(f"evaluate:generate_until batch_done={b_idx} acc_results={len(results_for_requests)}")
+            _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after")
+            # Optional GPU cache release between batches (set OE_EVAL_GPU_EMPTY_CACHE=1)
+            try:
+                if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
+                    import torch  # type: ignore
 
+                    torch.cuda.empty_cache()
+                    _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after_empty_cache")
+            except Exception:
+                pass
+
+    _log_mem("evaluate:end")
     return results_for_requests
 
 
@@ -639,6 +771,7 @@ def task_file_name(output_dir: str, task_idx: int, task_name: str, file_name: st
 
 def run_eval(args_dict: dict):
     eval_config = process_eval_args(args_dict)
+    _log_mem("run_eval:after_process_args")
     model_config = eval_config["model_config"]
     compute_config = eval_config["compute_config"]
     tasks_config = eval_config["tasks_config"]
@@ -669,11 +802,13 @@ def run_eval(args_dict: dict):
             n_probe = n_probe,
             retrieval_batch_size = eval_config["retrieval_batch_size"]
         )
+        _log_mem("run_eval:serve_retriever_initialized")
     elif retrieval_config is not None and retrieval_config['offline_retrieval_config']:
         offline_retrieval = OfflineRetrieval(
             retrieval_config=retrieval_config['offline_retrieval_config'],
             k=retrieval_config['k']
         )
+        _log_mem("run_eval:offline_retriever_initialized")
 
 
     task_objects = [
@@ -716,6 +851,7 @@ def run_eval(args_dict: dict):
         eval_model = load_model(model_load_config)
         # logger.info(f"Loaded model config: {eval_model.model.config}")
     logger.info(f"Model loaded. Model hash: {model_hash['hash']}")
+    _log_mem("run_eval:after_model_load")
 
     metrics_output_file = None
     remote_output_dir = compute_config["remote_output_dir"]
@@ -774,6 +910,7 @@ def run_eval(args_dict: dict):
         logger.info(f"  Task hash: {task_hash['hash']}, starting download...")
         task.download()
         logger.info("  Task finished downloading!")
+        _log_mem(f"task:{task_name}:after_download")
         if task_name.startswith("eleuther:") and task_config.get("use_chat_format"):
             chat_template = model_config.get("chat_template")
             if chat_template:
@@ -806,6 +943,7 @@ def run_eval(args_dict: dict):
             task_instances = task._instances if task._instances is not None else []
             eval_requests_raw = [ins.to_dict() for ins in task_instances]
         logger.info(f"Number of requests: {len(eval_requests_raw)}")
+        _log_mem(f"task:{task_name}:after_build_requests num_instances={len(task_instances) if task_instances else 0}")
         if len(eval_requests_raw) == 0:
             logger.error("No requests found this task! Skipping model processing...")
             continue
@@ -877,7 +1015,11 @@ def run_eval(args_dict: dict):
             # TODO: Make sure these are in the right order when mixing loglikelihood and generate_until
             logger.info(f"First inputs: {task._instances[0]}")
             #results_for_requests = evaluate(model=eval_model, instances=task._instances)
+            _log_mem(f"task:{task_name}:before_evaluate num_instances={len(task._instances) if task._instances else 0}")
+            _log_gpu_mem(f"task:{task_name}:before_evaluate")
             results_for_requests = evaluate(model=eval_model, instances=task._instances, batch_size=int(compute_config["batch_size"]))
+            _log_mem(f"task:{task_name}:after_evaluate num_results={len(results_for_requests)}")
+            _log_gpu_mem(f"task:{task_name}:after_evaluate")
 
             logger.info(f"First results: {results_for_requests[0]}")
 
@@ -892,7 +1034,9 @@ def run_eval(args_dict: dict):
         if unsafe_prediction_import:  # TODO: Fix/refactor this madness
             metric._scores_for_docs = cached_predictions
         else:
+            _log_mem(f"task:{task_name}:before_metric_compute num_results={len(results_for_requests)}")
             metric.compute_for_docs(results_for_requests)
+            _log_mem(f"task:{task_name}:after_metric_compute num_scores={len(metric._scores_for_docs) if hasattr(metric, '_scores_for_docs') else -1}")
 
         metrics_raw = metric.aggregate_to_task(primary_metric=task_config.get("primary_metric"))
 
@@ -942,12 +1086,25 @@ def run_eval(args_dict: dict):
                 logger.info(f"Saving recorded inputs in {recorded_inputs_file}...")
                 save_jsonl(recorded_inputs_file, recorded_inputs)
 
+        # Proactive clean-up and memory snapshot (no behavior change)
+        try:
+            import gc  # type: ignore
+            del results_for_requests
+            del predictions_raw
+            del eval_requests_raw
+            gc.collect()
+        except Exception:
+            pass
+        _log_mem(f"task:{task_name}:after_save_and_cleanup")
+        _log_gpu_mem(f"task:{task_name}:after_save_and_cleanup")
+
         if compute_config["gsheet"] is not None:
             logger.info(f"Writing to gsheet {compute_config['gsheet']}...")
             gsheet_res = write_metrics_to_gsheet(metrics, compute_config["gsheet"], TASK_DEFAULTS)
             logger.info(f"Data written to gsheet: {gsheet_res}")
 
         logger.info(f"\n\n** Task metrics: **\n{metrics}")
+        _log_mem(f"task:{task_name}:end_of_task_loop")
 
     if eval_model is None and not recompute_metrics:
         # We're done if no model was involved

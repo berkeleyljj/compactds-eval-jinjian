@@ -1,0 +1,7 @@
+{
+    "MMLU:STEM": 0.67,
+    "MMLU:other": 0.795,
+    "AGI Eval": 0.5824999999999999,
+    "Average w/o subcat": 0.5824999999999999,
+    "Average with subcat": 0.6825
+}

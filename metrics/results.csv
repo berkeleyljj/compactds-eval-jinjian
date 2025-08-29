@@ -1,2 +1,2 @@
-,index,Average w/o subcat,Average with subcat
-0,llama3_8B_8.19,,
+,index,MMLU:STEM,MMLU:other,AGI Eval,Average w/o subcat,Average with subcat
+0,llama3_8B_online_K1000_k10_exact,0.67,0.795,0.5824999999999999,0.5824999999999999,0.6825

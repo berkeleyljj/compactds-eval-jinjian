@@ -1,178 +1,217 @@
-'''
-Rerank retrieval results with oracle reranking using downstream performance.
-'''
-import numpy as np
+# exact_rerank.py
+# --------------------------------------------------------------------------------------
+# CHANGES SUMMARY
+# [MODIFIED] load_embedding_from_cache: uses np.load(..., mmap_mode='r') to keep RAM flat
+# [MODIFIED] save_embedding_to_cache: stores float32 to halve memory
+# [MODIFIED] embed_passages: adds clean cache hit/miss prints and saved count
+# [ADDED]    _batched_cosine_similarity: constant-memory cosine with query vs contexts
+# [MODIFIED] exact_rerank_topk: uses batched cosine (no giant vstack / sklearn buffers),
+#            casts to float32, and performs explicit cleanup (gc + torch.cuda.empty_cache)
+# --------------------------------------------------------------------------------------
+
 import os
-import torch
-
-from collections import defaultdict
-from tqdm import tqdm
-
-from modules.retriever.embed_util import load_embed_model, embed_batch
-from src.rerank.config import EmbeddingRerankConfig
-
-# note that `generate` doesn't actually always generate - see the code for details
-from src.rerank.utils import block_data, pre_sort
-from src.utils import write, sort_dicts_by_key, load_jsonl 
-
+import json
+import pickle as pkl
 import logging
-logger = logging.getLogger(__name__)
+from tqdm import tqdm
+import re
+import gc  # [ADDED] for explicit cleanup
 
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity  # (no longer used; safe to keep)
+import torch
+from transformers import AutoTokenizer, AutoModel
+from sentence_transformers import SentenceTransformer
+from rerank import contriever
+from normalize_text import normalize as nm
 
-def cossim(a, b):
-    dot_product = np.dot(a, b)
-    magnitude_a = np.linalg.norm(a)
-    magnitude_b = np.linalg.norm(b)
-    return dot_product / (magnitude_a * magnitude_b)
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+CACHE_DIR = "./embedding_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-def embedding_rerank(retrieval_results, rc: EmbeddingRerankConfig):
-    logger.info(rc)
+# [MODIFIED]: Use memmap to avoid loading entire arrays into RAM permanently.
+def load_embedding_from_cache(passage_id, mmap=True):
+    cache_path = os.path.join(CACHE_DIR, f"{passage_id}.npy")
+    if os.path.exists(cache_path):
+        return np.load(cache_path, mmap_mode='r') if mmap else np.load(cache_path)
+    return None
 
-    retrieval_results = pre_sort(retrieval_results, rc)
+# [MODIFIED]: Force float32 to reduce memory footprint and keep dtype consistent.
+def save_embedding_to_cache(passage_id, embedding):
+    cache_path = os.path.join(CACHE_DIR, f"{passage_id}.npy")
+    np.save(cache_path, np.asarray(embedding, dtype=np.float32))
 
-    if rc.chunk_size:
-        # TODO: Consider extracting this as a utility function in util.py so all rerank scripts can use
-        # Note: Will need to implement doc_extraction handling methods if this logic is brought to other rerank methods
-        chunked_file = os.path.join(rc.intermediate_output_dir, f"chunked_results_size_{rc.chunk_size}.jsonl")
-        if not os.path.exists(chunked_file):
-            for dt in tqdm(retrieval_results, desc="Chunking texts..."):
-                ctxs = dt[rc.ctx_key]
-                if rc.doc_extraction and rc.top_k_rerank:
-                    # Only rerank chunks for specific top_k_rerank documents for efficiency
-                    ctxs = ctxs[:rc.top_k_rerank]
+# [MODIFIED]: Clean cache-usage printing and consistent dtype handling.
+def embed_passages(args, raw_query, texts, passage_ids, model):
+    # Decide what we can pull from cache vs. what we need to compute
+    texts_to_embed = []
+    ids_to_embed = []
+    embeddings = {}
 
-                new_ctxs = []
-                for i, ctx in enumerate(ctxs):
-                    original_text = ctx[rc.retrieval_text_key]
-                    blocks = block_data(original_text, rc.chunk_size, min_block_length=(rc.chunk_size // 2))
-                    for block in blocks:
-                        block_metadata = {
-                            rc.retrieval_text_key: block,
-                            "source": ctx["source"]
-                        }
+    # Always (re)compute the query; we do not cache queries
+    texts_to_embed.append(raw_query)
+    ids_to_embed.append(None)
 
-                        if rc.doc_extraction:
-                            block_metadata["ctx_id"] = i
+    cached_hit_ids = []
+    cached_miss_ids = []
 
-                        new_ctxs.append(block_metadata)
-
-
-                dt[rc.ctx_key] = new_ctxs
-            
-            write(chunked_file, retrieval_results)
+    for text, pid in zip(texts, passage_ids):
+        cached = load_embedding_from_cache(pid)  # memmap read
+        if cached is not None:
+            embeddings[text] = cached
+            cached_hit_ids.append(pid)
         else:
-            # Use pre-chunked file
-            retrieval_results = load_jsonl(chunked_file)
+            texts_to_embed.append(text)
+            ids_to_embed.append(pid)
+            cached_miss_ids.append(pid)
 
-    # Build list of texts for embedding
-    embed_requests = []
-    for dt in tqdm(retrieval_results, desc="Building embed requests"):
-        # For each query, add embed request for original query and ctxs if ctxs is non-empty
-        query = dt[rc.retrieval_query_key]
-        embed_requests.append(query)
+    total = len(texts)
+    hits = len(cached_hit_ids)
+    misses = len(cached_miss_ids)
 
-        ctxs = dt[rc.ctx_key]
-        if rc.top_k_rerank and not rc.chunk_size:
-            # If chunk_size specified, top_k_rerank is applied during chunking phase
-            # Do not perform top_k_reranking immediately after chunking
-            ctxs = ctxs[:rc.top_k_rerank]
+    # Clean, single-line summary of cache usage
+    print(f"[CACHE] Using cached embeddings for {hits}/{total} passages; "
+          f"computing {misses} new passage embeddings + 1 query.")
+    if hits > 0:
+        print(f"[CACHE] Cache directory: {os.path.abspath(CACHE_DIR)}")
 
-        for ctx in ctxs:
-            text = ctx[rc.retrieval_text_key][:rc.retrieval_trunc_len]
-            embed_requests.append(text)
+    # Embed query + cache-miss passages
+    if texts_to_embed:
+        encoded = model.encode(
+            texts_to_embed,
+            batch_size=min(128, getattr(args, "per_gpu_batch_size", 128)),
+            instruction="<|embed|>\n"
+        )
+        saved_count = 0
+        for pid, emb, original_text in zip(ids_to_embed, encoded, texts_to_embed):
+            if np.isnan(emb).any():
+                logging.warning(f"[WARNING] Skipping text due to NaN in embedding: {original_text}")
+                continue
+            embeddings[original_text] = np.asarray(emb, dtype=np.float32)
+            # Cache only passage embeddings (pid != None)
+            if pid is not None:
+                save_embedding_to_cache(pid, emb)
+                saved_count += 1
 
-    print(f"Num texts to embed: {len(embed_requests)}")
+        if saved_count > 0:
+            print(f"[CACHE] Saved {saved_count} new passage embeddings to cache.")
 
-    # Load embed model
-    model, tokenizer = load_embed_model(rc.embedder_model, rc.device, rc.mode)
+    return embeddings
 
-    output_shape = None
-    embeddings_memmap = None
-    embed_file = os.path.join(rc.intermediate_output_dir, "reranking_embed.npy")
-    
-    # Make the intermediate output dir
-    os.makedirs(rc.intermediate_output_dir, exist_ok=True)
-    
-    if not os.path.exists(embed_file):
-        with torch.no_grad():
-            # Process passages in batches
-            for i in tqdm(range(0, len(embed_requests), rc.batch_size)):
-                batch = embed_requests[i:i + rc.batch_size]
-                
-                embeddings = embed_batch(batch, model, tokenizer, rc.device, mode=rc.mode)
+# [ADDED]: Constant-memory cosine (query vs. contexts) with batching.
+def _batched_cosine_similarity(query_vec, ctx_texts, text_to_embeddings, batch_size=2048):
+    """
+    query_vec: (1, D) float32
+    ctx_texts: list[str] of normalized context texts (keys into text_to_embeddings)
+    text_to_embeddings: dict[text] -> np.ndarray or np.memmap (D,)
+    """
+    n = len(ctx_texts)
+    scores = np.empty(n, dtype=np.float32)
 
-                if embeddings_memmap is None:
-                    # Instantiate embeddings map with length of corpus and shape of embedding
-                    print(f"Embed shape: {embeddings.shape}")
-                    embed_shape = embeddings.shape
-                    output_shape = (len(embed_requests), embed_shape[1])
-                    print(f"Output shape: {output_shape}")
-                    embeddings_memmap = np.memmap(embed_file, dtype='float32', mode='w+', shape=output_shape)
+    # Normalize query once
+    q = query_vec.astype(np.float32, copy=False)
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True)
+    q = q / np.maximum(q_norm, 1e-12)  # (1, D)
 
-                # Move embeddings to CPU and convert to numpy
-                embeddings_memmap[i:i + len(batch)] = embeddings
-                embeddings_memmap.flush()
+    for i in range(0, n, batch_size):
+        chunk_texts = ctx_texts[i:i + batch_size]
 
-                write_equal = np.all(np.equal(embeddings[0], embeddings_memmap[i]))
+        # Materialize only the needed chunk into RAM and cast to float32
+        # Shape: (B, D)
+        chunk = np.vstack([
+            np.asarray(text_to_embeddings[t], dtype=np.float32)
+            for t in chunk_texts
+        ])
 
-                assert write_equal
+        # L2-normalize rows for cosine
+        denom = np.linalg.norm(chunk, axis=1, keepdims=True)
+        chunk = chunk / np.maximum(denom, 1e-12)
 
-            print(embeddings_memmap.shape)
-    else:
-        # Get embedding size from output
-        test_embedding = embed_batch(embed_requests[:1], model, tokenizer, rc.device, mode=rc.mode)
-        embed_shape = test_embedding.shape
-        output_shape = (len(embed_requests), embed_shape[1])
-        embeddings_memmap = np.memmap(embed_file, dtype='float32', mode='r', shape=output_shape)
+        # Cosine with single query: (1, D) @ (D, B) -> (1, B)
+        chunk_scores = (q @ chunk.T)[0]  # (B,)
 
-    # Build retrieval scores and rerank
-    new_score_key = rc.new_score_key if rc.new_score_key else rc.retrieval_score_key
-    idx= 0
-    for dt in tqdm(retrieval_results, desc="Building retrieval scores"):
-        query = dt[rc.retrieval_query_key]
-        ctxs = dt[rc.ctx_key]
+        scores[i:i + len(chunk_texts)] = chunk_scores
 
-        # Get embedding chunk and compute retrieval scores
-        # +1 to account for the query embed before ctx embeds
-        actual_ctx_count = min(rc.top_k_rerank, len(ctxs)) if rc.top_k_rerank and not rc.chunk_size else len(ctxs)
-        embedding_chunk_size = 1 + actual_ctx_count
-        embedding_chunk = embeddings_memmap[idx: idx + embedding_chunk_size]
+        # Free asap
+        del chunk, denom, chunk_scores
 
-        if embedding_chunk.shape[0] < embedding_chunk_size:
-            raise ValueError(f"Insufficient number of embeddings for query at idx={idx}, expected={embedding_chunk_size}, got={embedding_chunk.shape[0]}")
+    return scores
 
-        query_embed = embedding_chunk[0]
+# Defaults to memory reranking with live passages
+def exact_rerank_topk(raw_passages, query_encoder):
+    logging.info(f"Doing exact reranking for {len(raw_passages)} total evaluation samples...")
 
-        if actual_ctx_count > 0:
-            # Note: Embedding Rerank uses exact Cosine Similarity, making it
-            # incomparable to retrieval scores from approximate similarity methods
-            if rc.doc_extraction:
-                id_to_chunks = defaultdict(list)
-                for ctx, embed in zip(ctxs, embedding_chunk[1:]):
-                    ctx_id = ctx["ctx_id"]
-                    retrieval_score = cossim(query_embed, embed)
-                    ctx[new_score_key] = retrieval_score.item()
-                    id_to_chunks[ctx_id].append(ctx)
+    raw_query = raw_passages[0]['raw_query']
 
-                best_chunks = []
-                for i in sorted(id_to_chunks.keys()):
-                    doc_chunks = id_to_chunks[i]
-                    ordered_chunks, _ = sort_dicts_by_key(doc_chunks, [new_score_key, rc.retrieval_score_key], reversed=True)
-                    best_chunks.append(ordered_chunks[0])
+    # Pre-normalize contexts (same as your original)
+    ctxs = [nm(p["text"].lower()) for p in raw_passages]
+    ctx_ids = [p["passage_id"] for p in raw_passages]
 
-                dt[rc.ctx_key] = best_chunks
-            else:
-                for ctx, embed in zip(ctxs, embedding_chunk[1:]):
-                    retrieval_score = cossim(query_embed, embed)
-                    ctx[new_score_key] = retrieval_score.item()
+    from types import SimpleNamespace
+    args = SimpleNamespace(
+        per_gpu_batch_size=128,
+        get=lambda k, default=None: default
+    )
 
-                dt[rc.ctx_key], _ = sort_dicts_by_key(ctxs, [new_score_key, rc.retrieval_score_key], reversed=True)
+    print("[INFO] Embedding query and contexts (with cache)...")
+    text_to_embeddings = embed_passages(
+        args=args,
+        raw_query=raw_query,
+        texts=ctxs,
+        passage_ids=ctx_ids,
+        model=query_encoder
+    )
 
-        idx += embedding_chunk_size
-    
-    assert idx == len(embeddings_memmap), f"{idx}, {len(embeddings_memmap)}"
+    # Build query embedding (float32)
+    if raw_query not in text_to_embeddings:
+        raise RuntimeError("Query embedding not found in text_to_embeddings (unexpected).")
 
-    return retrieval_results
+    query_embedding = np.asarray(text_to_embeddings[raw_query], dtype=np.float32).reshape(1, -1)
 
+    # Sanity check: ensure all ctxs are present
+    missing_any = False
+    for text in ctxs:
+        if text not in text_to_embeddings:
+            missing_any = True
+            break
+    if missing_any:
+        print("[WARN] Missing one or more context embeddings.")
+        print(f"[INFO] Embedding cache directory: {os.path.abspath(CACHE_DIR)}")
 
+    print("[INFO] Calculating exact cosine similarities in batches...")
+    similarities = _batched_cosine_similarity(
+        query_embedding, ctxs, text_to_embeddings, batch_size=2048
+    )
+
+    # Assign scores (float)
+    for i, p in enumerate(raw_passages):
+        s = similarities[i]
+        p["exact score"] = float(s) if not np.isnan(s) else -1.0
+
+    # Sort by exact cosine score (desc)
+    raw_passages.sort(key=lambda p: p["exact score"], reverse=True)
+
+    # [MODIFIED]: Explicit cleanup to prevent gradual RAM growth across eval loop
+    del text_to_embeddings, query_embedding, similarities
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return raw_passages
+
+def normalize_text(text):
+    def remove_articles(text):
+        return re.sub(r"\b(a|an|the)\b", " ", text)
+
+    def white_space_fix(text):
+        return " ".join(text.split())
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(lower(text)))
+
+def search_topk(cfg):
+    exact_rerank_topk(cfg)
