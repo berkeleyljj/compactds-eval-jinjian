@@ -318,7 +318,7 @@ _parser.add_argument(
     default=1
 )
 _parser.add_argument(
-    "--max-batch-size", type=int, default=32, help="Max batch size of to try for auto batch-size"
+    "--max-batch-size", type=int, default=4, help="Max batch size of to try for auto batch-size"
 )
 _parser.add_argument("--output-dir", type=str, default=None, help="Directory for output files")
 _parser.add_argument(
@@ -393,8 +393,6 @@ def convert_chat_instance(model, ins, chat_template=None):
 #     return results_for_requests
 
 def evaluate(model, instances, batch_size):
-    # Token-aware batching to avoid OOM while maximizing throughput.
-    # This ignores the fixed sample-count batch_size and instead packs by prompt tokens.
 
     def _safe_token_len(req_dict):
         try:
@@ -404,7 +402,7 @@ def evaluate(model, instances, batch_size):
             # Fallback if tokenizer errors or unexpected structure
             return 0
 
-    def _pack_by_token_budget(reqs_with_ins, max_prompt_tokens_per_batch=20000, max_batch=100):
+    def _pack_by_token_budget(reqs_with_ins, max_prompt_tokens_per_batch=16384, max_batch=100):
         # reqs_with_ins: List[Tuple[RequestInstance, dict]]
         enriched = []
         for ins_obj, req in reqs_with_ins:
@@ -477,8 +475,15 @@ def evaluate(model, instances, batch_size):
             try:
                 if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
                     import torch  # type: ignore
+                    import gc
 
+                    # Force garbage collection
+                    gc.collect()
+                    # Clear GPU cache
                     torch.cuda.empty_cache()
+                    # Synchronize to ensure cache is cleared
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                     _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after_empty_cache")
             except Exception:
                 pass
@@ -500,8 +505,15 @@ def evaluate(model, instances, batch_size):
             try:
                 if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
                     import torch  # type: ignore
+                    import gc
 
+                    # Force garbage collection
+                    gc.collect()
+                    # Clear GPU cache
                     torch.cuda.empty_cache()
+                    # Synchronize to ensure cache is cleared
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                     _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after_empty_cache")
             except Exception:
                 pass
@@ -1089,10 +1101,17 @@ def run_eval(args_dict: dict):
         # Proactive clean-up and memory snapshot (no behavior change)
         try:
             import gc  # type: ignore
+            import torch
+            
             del results_for_requests
             del predictions_raw
             del eval_requests_raw
             gc.collect()
+            
+            # Clear GPU cache after each task
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
         except Exception:
             pass
         _log_mem(f"task:{task_name}:after_save_and_cleanup")

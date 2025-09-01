@@ -173,7 +173,6 @@ class Task(abc.ABC):
             cache_dir=cache_dir or self.cache_dir,
             download_mode=download_mode or self.download_mode,
             revision=self.task_config.get("revision"),
-            trust_remote_code=True,
         )
 
     @abstractmethod
