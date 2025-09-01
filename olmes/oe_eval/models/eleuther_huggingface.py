@@ -229,6 +229,7 @@ class HFLM_Verbose(HFLM):
         )
 
         chunks = re_ord.get_batched(n=batch_size, batch_fn=batch_fn)
+        print(f"================== batch_size: {batch_size} ==================\n")
         pbar = tqdm(
             total=len(requests),
             disable=(disable_tqdm or (self.rank != 0)),
@@ -249,6 +250,8 @@ class HFLM_Verbose(HFLM):
             # again because vectorizing is annoying
 
             for _, context_enc, continuation_enc in chunk:
+                # print(f"================== len(context_enc): {len(context_enc)} ==================\n")
+                # print(f"================== len(continuation_enc): {len(continuation_enc)} ==================\n")
                 # sanity check
                 assert len(context_enc) > 0
                 assert len(continuation_enc) > 0
@@ -492,9 +495,12 @@ class HFLM_Verbose(HFLM):
                     max_gen_toks = max_gen_toks
             truncate_context = kwargs.pop("truncate_context", True)
 
+            print(f"================== truncate_context: {truncate_context} ==================\n")
+
             # set the max length in tokens of inputs ("context_enc")
             if self.AUTO_MODEL_CLASS == transformers.AutoModelForCausalLM:
                 if truncate_context:
+                    print(f"================== truncate_context: True ==================\n")
                     # max len for inputs = max length, minus room to generate the max new tokens
                     max_ctx_len = self.max_length - max_gen_toks
                     if max_ctx_len <= 0:

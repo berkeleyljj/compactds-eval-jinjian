@@ -6,12 +6,12 @@ export OE_EVAL_GPU_EMPTY_CACHE=1
 # Shared config
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 MODEL_TYPE="hf"
-MODEL_ARGS='{"max_length": 16384, "dtype": "float32", "attn_implementation": "eager", "low_cpu_mem_usage": true}'
+MODEL_ARGS='{"max_length": 16384, "dtype": "float32", "low_cpu_mem_usage": true}'
 n_docs=10
 API_URL="http://192.222.59.156:30888/search"
 N_PROBE=256
 SAVE_RAW=true
-
+ 
 # Dataset list
 declare -a TASKS=("mmlu_pro:mc::retrieval")
 

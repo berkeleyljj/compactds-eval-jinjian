@@ -51,6 +51,8 @@ from oe_eval.utils import (
     show_model_input,
 )
 
+from oe_eval.truncate import truncate_long_contexts
+
 from src.config import ExperimentConfig
 from modules.retriever.offline_retrieval import OfflineRetrieval
 
@@ -373,153 +375,166 @@ def convert_chat_instance(model, ins, chat_template=None):
     return ins
 
 
-# def evaluate(model, instances):
-#     instances_types = defaultdict(list)
-
-#     for ins in instances:
-#         instances_types[ins.request_type].append(ins)
-
-#     results_for_requests = []
-#     if len(instances_types["loglikelihood"]) > 0:
-#         requests_logll = [ins.request for ins in instances_types["loglikelihood"]]
-#         output = model.loglikelihood_verbose(requests=requests_logll)
-#         results_for_requests += collate_results(instances_types["loglikelihood"], output)
-
-#     if len(instances_types["generate_until"]) > 0:
-#         requests_generate = [ins.request for ins in instances_types["generate_until"]]
-#         output = model.generate_until_verbose(requests=requests_generate)
-#         results_for_requests += collate_results(instances_types["generate_until"], output)
-
-#     return results_for_requests
-
-def evaluate(model, instances, batch_size):
-
-    def _safe_token_len(req_dict):
-        try:
-            ctx = req_dict.get("context") or req_dict.get("inputs") or ""
-            return len(model.tokenizer(ctx, add_special_tokens=False).input_ids)
-        except Exception:
-            # Fallback if tokenizer errors or unexpected structure
-            return 0
-
-    def _pack_by_token_budget(reqs_with_ins, max_prompt_tokens_per_batch=16384, max_batch=100):
-        # reqs_with_ins: List[Tuple[RequestInstance, dict]]
-        enriched = []
-        for ins_obj, req in reqs_with_ins:
-            enriched.append((ins_obj, req, _safe_token_len(req)))
-        # Sort by length desc to reduce padding waste
-        enriched.sort(key=lambda x: x[2], reverse=True)
-
-        batches = []
-        cur, cur_sum = [], 0
-        for ins_obj, req, L in enriched:
-            if cur and (cur_sum + L > max_prompt_tokens_per_batch or len(cur) >= max_batch):
-                batches.append(cur)
-                cur, cur_sum = [], 0
-            cur.append((ins_obj, req))
-            cur_sum += L
-        if cur:
-            batches.append(cur)
-        return batches
-
-    _log_mem("evaluate:start")
+def evaluate(model, instances):
     instances_types = defaultdict(list)
+
     for ins in instances:
         instances_types[ins.request_type].append(ins)
 
-    # Prompt length diagnostics (to check truncation risk)
-    try:
-        all_reqs = []
-        if len(instances_types["loglikelihood"]) > 0:
-            all_reqs.extend([ins.request for ins in instances_types["loglikelihood"]])
-        if len(instances_types["generate_until"]) > 0:
-            all_reqs.extend([ins.request for ins in instances_types["generate_until"]])
-
-        if all_reqs:
-            lengths = []
-            for req in all_reqs:
-                ctx = (req.get("context") or req.get("inputs") or "")
-                # Use add_special_tokens=False to reflect raw prompt body
-                tok_len = len(model.tokenizer(ctx, add_special_tokens=False).input_ids)
-                lengths.append(tok_len)
-            if lengths:
-                max_len = max(lengths)
-                # Best-effort read of model max length from model.config or fallback to tokenizer.model_max_length
-                model_max = getattr(getattr(model, "model", None), "config", None)
-                if model_max is not None and hasattr(model_max, "max_position_embeddings"):
-                    cap = int(model_max.max_position_embeddings)
-                else:
-                    cap = int(getattr(model.tokenizer, "model_max_length", 0) or 0)
-                eq_cap = sum(1 for L in lengths if cap and L >= cap)
-                print(f"[PROMPT LEN] num_reqs={len(lengths)} max_prompt_tokens={max_len} model_cap={cap} num_at_or_above_cap={eq_cap}")
-    except Exception as _e:
-        # Do not fail eval on diagnostics
-        pass
-
     results_for_requests = []
-
-    # loglikelihood with token-aware batches
     if len(instances_types["loglikelihood"]) > 0:
-        ll_instances = instances_types["loglikelihood"]
-        reqs_with_ins = [(ins, ins.request) for ins in ll_instances]
-        for b_idx, packed in enumerate(_pack_by_token_budget(reqs_with_ins)):
-            batch_ins = [p[0] for p in packed]
-            batch_reqs = [p[1] for p in packed]
-            _log_mem(f"evaluate:loglikelihood batch={b_idx} size={len(batch_reqs)} acc_results={len(results_for_requests)}")
-            _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} before")
-            output = model.loglikelihood_verbose(requests=batch_reqs)
-            results_for_requests += collate_results(batch_ins, output)
-            _log_mem(f"evaluate:loglikelihood batch_done={b_idx} acc_results={len(results_for_requests)}")
-            _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after")
-            # Optional GPU cache release between batches (set OE_EVAL_GPU_EMPTY_CACHE=1)
-            try:
-                if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
-                    import torch  # type: ignore
-                    import gc
+        requests_logll = [ins.request for ins in instances_types["loglikelihood"]]
+        output = model.loglikelihood_verbose(requests=requests_logll)
+        results_for_requests += collate_results(instances_types["loglikelihood"], output)
 
-                    # Force garbage collection
-                    gc.collect()
-                    # Clear GPU cache
-                    torch.cuda.empty_cache()
-                    # Synchronize to ensure cache is cleared
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after_empty_cache")
-            except Exception:
-                pass
-
-    # generate_until with token-aware batches
     if len(instances_types["generate_until"]) > 0:
-        gen_instances = instances_types["generate_until"]
-        reqs_with_ins = [(ins, ins.request) for ins in gen_instances]
-        for b_idx, packed in enumerate(_pack_by_token_budget(reqs_with_ins)):
-            batch_ins = [p[0] for p in packed]
-            batch_reqs = [p[1] for p in packed]
-            _log_mem(f"evaluate:generate_until batch={b_idx} size={len(batch_reqs)} acc_results={len(results_for_requests)}")
-            _log_gpu_mem(f"evaluate:generate_until batch={b_idx} before")
-            output = model.generate_until_verbose(requests=batch_reqs)
-            results_for_requests += collate_results(batch_ins, output)
-            _log_mem(f"evaluate:generate_until batch_done={b_idx} acc_results={len(results_for_requests)}")
-            _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after")
-            # Optional GPU cache release between batches (set OE_EVAL_GPU_EMPTY_CACHE=1)
-            try:
-                if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
-                    import torch  # type: ignore
-                    import gc
+        requests_generate = [ins.request for ins in instances_types["generate_until"]]
+        output = model.generate_until_verbose(requests=requests_generate)
+        results_for_requests += collate_results(instances_types["generate_until"], output)
 
-                    # Force garbage collection
-                    gc.collect()
-                    # Clear GPU cache
-                    torch.cuda.empty_cache()
-                    # Synchronize to ensure cache is cleared
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after_empty_cache")
-            except Exception:
-                pass
-
-    _log_mem("evaluate:end")
     return results_for_requests
+
+# def evaluate(model, instances, batch_size):
+#     # Old
+#     # def _safe_token_len(req_dict):
+#     #     try:
+#     #         ctx = req_dict.get("context") or req_dict.get("inputs") or ""
+#     #         return len(model.tokenizer(ctx, add_special_tokens=False).input_ids)
+#     #     except Exception:
+#     #         # Fallback if tokenizer errors or unexpected structure
+#     #         return 0
+
+
+#     def _safe_token_len(req):
+#         try:
+#             if isinstance(req, dict):
+#                 ctx = req.get("context") or req.get("inputs") or ""
+#             else:
+#                 ctx = getattr(req, "context", None) or getattr(req, "inputs", None) or ""
+#             return len(model.tokenizer(ctx, add_special_tokens=False).input_ids) if ctx else 0
+#         except Exception:
+#             return 0
+
+#     def _pack_by_token_positions(reqs_with_ins, max_token_positions=450_000, max_batch=200):
+#         # memory ~ max_len_in_batch * batch_siz
+#         enriched = [(ins, req, _safe_token_len(req)) for ins, req in reqs_with_ins]
+#         enriched.sort(key=lambda x: x[2], reverse=True)
+
+#         batches, cur, cur_max = [], [], 0
+#         for ins, req, L in enriched:
+#             if L == 0:
+#                 L = 1  # keep it packable
+#             new_max = max(cur_max, L)
+#             new_bs = len(cur) + 1
+#             if cur and (new_max * new_bs > max_token_positions or new_bs > max_batch):
+#                 batches.append(cur)
+#                 cur, cur_max = [], 0
+#                 new_max, new_bs = L, 1
+#             cur.append((ins, req))
+#             cur_max = new_max
+#         if cur:
+#             batches.append(cur)
+#         return batches
+
+
+#     _log_mem("evaluate:start")
+#     instances_types = defaultdict(list)
+#     for ins in instances:
+#         instances_types[ins.request_type].append(ins)
+
+#     # Prompt length diagnostics (to check truncation risk)
+#     try:
+#         all_reqs = []
+#         if len(instances_types["loglikelihood"]) > 0:
+#             all_reqs.extend([ins.request for ins in instances_types["loglikelihood"]])
+#         if len(instances_types["generate_until"]) > 0:
+#             all_reqs.extend([ins.request for ins in instances_types["generate_until"]])
+
+#         if all_reqs:
+#             lengths = []
+#             for req in all_reqs:
+#                 ctx = (req.get("context") or req.get("inputs") or "")
+#                 # Use add_special_tokens=False to reflect raw prompt body
+#                 tok_len = len(model.tokenizer(ctx, add_special_tokens=False).input_ids)
+#                 lengths.append(tok_len)
+#             if lengths:
+#                 max_len = max(lengths)
+#                 # Best-effort read of model max length from model.config or fallback to tokenizer.model_max_length
+#                 model_max = getattr(getattr(model, "model", None), "config", None)
+#                 if model_max is not None and hasattr(model_max, "max_position_embeddings"):
+#                     cap = int(model_max.max_position_embeddings)
+#                 else:
+#                     cap = int(getattr(model.tokenizer, "model_max_length", 0) or 0)
+#                 eq_cap = sum(1 for L in lengths if cap and L >= cap)
+#                 print(f"[PROMPT LEN] num_reqs={len(lengths)} max_prompt_tokens={max_len} model_cap={cap} num_at_or_above_cap={eq_cap}")
+#     except Exception as _e:
+#         # Do not fail eval on diagnostics
+#         pass
+
+#     results_for_requests = []
+
+#     # loglikelihood with token-aware batches
+#     if len(instances_types["loglikelihood"]) > 0:
+#         ll_instances = instances_types["loglikelihood"]
+#         reqs_with_ins = [(ins, ins.request) for ins in ll_instances]
+#         for b_idx, packed in enumerate(_pack_by_token_positions(reqs_with_ins)):
+#             batch_ins = [p[0] for p in packed]
+#             batch_reqs = [p[1] for p in packed]
+#             _log_mem(f"evaluate:loglikelihood batch={b_idx} size={len(batch_reqs)} acc_results={len(results_for_requests)}")
+#             _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} before")
+#             output = model.loglikelihood_verbose(requests=batch_reqs)
+#             results_for_requests += collate_results(batch_ins, output)
+#             _log_mem(f"evaluate:loglikelihood batch_done={b_idx} acc_results={len(results_for_requests)}")
+#             _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after")
+#             # Optional GPU cache release between batches (set OE_EVAL_GPU_EMPTY_CACHE=1)
+#             try:
+#                 if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
+#                     import torch  # type: ignore
+#                     import gc
+
+#                     # Force garbage collection
+#                     gc.collect()
+#                     # Clear GPU cache
+#                     torch.cuda.empty_cache()
+#                     # Synchronize to ensure cache is cleared
+#                     if torch.cuda.is_available():
+#                         torch.cuda.synchronize()
+#                     _log_gpu_mem(f"evaluate:loglikelihood batch={b_idx} after_empty_cache")
+#             except Exception:
+#                 pass
+
+#     # generate_until with token-aware batches
+#     if len(instances_types["generate_until"]) > 0:
+#         gen_instances = instances_types["generate_until"]
+#         reqs_with_ins = [(ins, ins.request) for ins in gen_instances]
+#         for b_idx, packed in enumerate(_pack_by_token_positions(reqs_with_ins)):
+#             batch_ins = [p[0] for p in packed]
+#             batch_reqs = [p[1] for p in packed]
+#             _log_mem(f"evaluate:generate_until batch={b_idx} size={len(batch_reqs)} acc_results={len(results_for_requests)}")
+#             _log_gpu_mem(f"evaluate:generate_until batch={b_idx} before")
+#             output = model.generate_until_verbose(requests=batch_reqs)
+#             results_for_requests += collate_results(batch_ins, output)
+#             _log_mem(f"evaluate:generate_until batch_done={b_idx} acc_results={len(results_for_requests)}")
+#             _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after")
+#             # Optional GPU cache release between batches (set OE_EVAL_GPU_EMPTY_CACHE=1)
+#             try:
+#                 if os.getenv("OE_EVAL_GPU_EMPTY_CACHE") == "1":
+#                     import torch  # type: ignore
+#                     import gc
+
+#                     # Force garbage collection
+#                     gc.collect()
+#                     # Clear GPU cache
+#                     torch.cuda.empty_cache()
+#                     # Synchronize to ensure cache is cleared
+#                     if torch.cuda.is_available():
+#                         torch.cuda.synchronize()
+#                     _log_gpu_mem(f"evaluate:generate_until batch={b_idx} after_empty_cache")
+#             except Exception:
+#                 pass
+
+#     _log_mem("evaluate:end")
+#     return results_for_requests
 
 
 
@@ -966,7 +981,7 @@ def run_eval(args_dict: dict):
         ):
             logger.info(f"Saving raw requests in {requests_output_file}...")
             save_jsonl(requests_output_file, eval_requests_raw)
-        logger.info(f"First request raw: {eval_requests_raw[0]}")
+        # logger.info(f"First inputs: {eval_requests_raw[0]}")
 
         processing_time = time.time() - start_time  # Only used if no model is involved
         full_config = {
@@ -1017,24 +1032,17 @@ def run_eval(args_dict: dict):
             if task_config.get("use_chat_format") and model_config["model_type"] != "litellm":
                 for ins in task_instances:
                     convert_chat_instance(eval_model, ins, model_config.get("chat_template"))
+            
+            # Truncate outliers (in-place) to protect batching
+            truncate_long_contexts(
+                task_instances,
+                target_cap=14_000,
+                eval_model=eval_model,
+                model_config=model_config,
+                verbose=True,
+            )
             # Log requests associated with first instance
-            first_requests = eval_requests_raw[0].copy()
-            del first_requests["request"]
-            first_requests["requests"] = [
-                r for r in eval_requests_raw if r["doc_id"] == first_requests["doc_id"]
-            ]
-            logger.info("\n".join(show_model_input(first_requests)))
-            # TODO: Make sure these are in the right order when mixing loglikelihood and generate_until
-            logger.info(f"First inputs: {task._instances[0]}")
-            #results_for_requests = evaluate(model=eval_model, instances=task._instances)
-            _log_mem(f"task:{task_name}:before_evaluate num_instances={len(task._instances) if task._instances else 0}")
-            _log_gpu_mem(f"task:{task_name}:before_evaluate")
-            results_for_requests = evaluate(model=eval_model, instances=task._instances, batch_size=int(compute_config["batch_size"]))
-            _log_mem(f"task:{task_name}:after_evaluate num_results={len(results_for_requests)}")
-            _log_gpu_mem(f"task:{task_name}:after_evaluate")
-
-            logger.info(f"First results: {results_for_requests[0]}")
-
+            results_for_requests = evaluate(model=eval_model, instances=task._instances)
         # Post-process generation results for metrics
         task.make_metrics()
         if task._metrics:

@@ -496,10 +496,10 @@ class Task(abc.ABC):
                 if query not in serve_retriever.batched_results:
                     raise ValueError(f"Batched result missing for query: {query}")
                 ctxs = serve_retriever.batched_results[query]
-                print(f"\n[DEBUG] ctxs type: {type(ctxs)}")
+                # print(f"\n[DEBUG] ctxs type: {type(ctxs)}")
                 # print(f"[DEBUG] ctxs: {ctxs}")
-                if isinstance(ctxs, dict):
-                    print(f"[DEBUG] ctxs keys: {list(ctxs.keys())}\n")
+                # if isinstance(ctxs, dict):
+                #     print(f"[DEBUG] ctxs keys: {list(ctxs.keys())}\n")
 
             else:
                 try:
