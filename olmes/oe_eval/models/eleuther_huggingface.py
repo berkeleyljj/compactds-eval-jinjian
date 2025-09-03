@@ -91,6 +91,14 @@ class HFLM_Verbose(HFLM):
         self.current_task_name: Optional[str] = os.getenv("CURRENT_TASK_NAME")
         self.truncation_log_path: Optional[str] = os.getenv("TRUNCATION_LOG")
         self.truncation_events: List[Dict[str, Any]] = []
+        # Truncation usage counters
+        self.context_trunc_count: int = 0
+        self.generation_trunc_count: int = 0
+        self.truncation_summary_path: Optional[str] = os.getenv("TRUNCATION_SUMMARY")
+        # Optional generation length logging
+        self.genlen_log_path: Optional[str] = os.getenv("GENLEN_LOG")
+        self.genlen_summary_path: Optional[str] = os.getenv("GENLEN_SUMMARY")
+        self.genlen_records: List[Dict[str, Any]] = []
 
     def loglikelihood_rolling_verbose(
         self, requests: List[Instance], disable_tqdm: bool = False
@@ -400,6 +408,14 @@ class HFLM_Verbose(HFLM):
     def generate_until_verbose(
         self, requests: List[GenerateUntilRequest], disable_tqdm: bool = False
     ) -> List[dict]:
+        # Reset per-call counters and records so logs are per-task-call
+        try:
+            self.genlen_records = []
+            self.truncation_events = []
+            self.context_trunc_count = 0
+            self.generation_trunc_count = 0
+        except Exception:
+            pass
         # Convert to request_args used in original lm_eval generate_until for minimal diff
         request_args: List[Tuple[str, dict]] = []
         for request in requests:
@@ -493,7 +509,9 @@ class HFLM_Verbose(HFLM):
                     max_gen_toks = int(min(int(max_gen_toks), int(self.max_gen_toks_cap)))
                 except Exception:
                     max_gen_toks = max_gen_toks
+            # Local-only control; remove from kwargs if present to avoid passing to HF generate
             truncate_context = kwargs.pop("truncate_context", True)
+            truncate_context = True
 
             print(f"================== truncate_context: {truncate_context} ==================\n")
 
@@ -503,6 +521,9 @@ class HFLM_Verbose(HFLM):
                     print(f"================== truncate_context: True ==================\n")
                     # max len for inputs = max length, minus room to generate the max new tokens
                     max_ctx_len = self.max_length - max_gen_toks
+                    print(f"================== max_ctx_len: {max_ctx_len} ==================\n")
+                    print(f"================== max_gen_toks: {max_gen_toks} ==================\n")
+                    print(f"================== self.max_length: {self.max_length} ==================\n")
                     if max_ctx_len <= 0:
                         raise ValueError(
                             f"max_gen_toks ({max_gen_toks}) is greater than max_length ({self.max_length}), "
@@ -560,9 +581,22 @@ class HFLM_Verbose(HFLM):
                 -1
             )  # shape [batch_size, seq_len]
             gen_log_probs_list = torch.gather(log_probs, 2, gen_sequences[:, :, None]).squeeze(-1)
+            _ctx_lens = attn_masks.sum(dim=1).tolist()
 
-            for cont_toks, gen_scores, gen_log_probs, context in zip(
-                cont_toks_list, gen_scores_list, gen_log_probs_list, contexts
+            # Count context truncations (left-truncation applied) per item
+            try:
+                if truncate_context:
+                    _orig_ctx_lens = [len(self.tok_encode(c)) for c in contexts]
+                    trunc_count_chunk = sum(1 for i, orig in enumerate(_orig_ctx_lens) if orig > int(_ctx_lens[i]))
+                    self.context_trunc_count += int(trunc_count_chunk)
+            except Exception:
+                pass
+
+
+
+
+            for idx, (cont_toks, gen_scores, gen_log_probs, context) in enumerate(
+                zip(cont_toks_list, gen_scores_list, gen_log_probs_list, contexts)
             ):
                 # discard context + left-padding toks if using causal decoder-only LM
                 if self.AUTO_MODEL_CLASS == transformers.AutoModelForCausalLM:
@@ -571,15 +605,40 @@ class HFLM_Verbose(HFLM):
                 s_raw = self.tok_decode(cont_toks)
                 s = cut_at_stop_sequence(s_raw, until)
                 no_pad_len = len(cont_toks)
-                for idx, tok in enumerate(cont_toks):
+                for t_idx, tok in enumerate(cont_toks):
                     # Keep the first eot_token encountered
                     if tok == self.eot_token_id:
-                        no_pad_len = idx + 1
+                        no_pad_len = t_idx + 1
                         break
                     if tok == self.tokenizer.pad_token_id:
-                        no_pad_len = idx
+                        no_pad_len = t_idx
                         break
                 cont_toks_no_pad = cont_toks[:no_pad_len]
+
+                # >>> ADDED: print generation token counts
+                ctx_len_i = int(_ctx_lens[idx]) if idx < len(_ctx_lens) else int(context_enc.shape[1])
+                gen_len_raw = len(cont_toks)          # before trimming EOS/PAD
+                gen_len_eff = len(cont_toks_no_pad)   # effective generated tokens we score
+                stop_hit = "yes" if s_raw != s else "no"  # stopped by a stop string (not just EOS)
+                print(
+                    f"[GENLEN] item={idx} ctx_tokens={ctx_len_i} "
+                    f"gen_tokens={gen_len_eff} (raw={gen_len_raw}) "
+                    f"max_gen_toks={max_gen_toks} stop_hit={stop_hit}"
+                )
+                # <<< ADDED
+
+                # Record generation length metrics for optional JSON logging
+                try:
+                    self.genlen_records.append({
+                        "task": self.current_task_name,
+                        "ctx_tokens": int(ctx_len_i),
+                        "gen_tokens_raw": int(gen_len_raw),
+                        "gen_tokens_eff": int(gen_len_eff),
+                        "max_gen_toks": int(max_gen_toks) if isinstance(max_gen_toks, (int, float, str)) and str(max_gen_toks).isdigit() else max_gen_toks,
+                        "stop_hit": bool(s_raw != s),
+                    })
+                except Exception:
+                    pass
 
                 logits = gen_log_probs[: len(cont_toks_no_pad)]
                 sum_logits = logits.sum().item()
@@ -606,6 +665,7 @@ class HFLM_Verbose(HFLM):
                             "generated_len": int(len(cont_toks_no_pad)),
                             "context_preview": str(context)[:200],
                         })
+                        self.generation_trunc_count += 1
                 except Exception:
                     pass
         # reorder this group of results back to original unsorted form
@@ -620,6 +680,59 @@ class HFLM_Verbose(HFLM):
                     for _rec in self.truncation_events:
                         _fp.write(json.dumps(_rec, ensure_ascii=False) + "\n")
                 self.truncation_events = []
+        except Exception:
+            pass
+
+        # Truncation summary (context and generation) written once per call
+        try:
+            summary = {
+                "task": self.current_task_name,
+                "context_truncations": int(self.context_trunc_count),
+                "generation_truncations": int(self.generation_trunc_count),
+            }
+            summary_path = self.truncation_summary_path
+            if not summary_path and self.truncation_log_path:
+                if self.truncation_log_path.endswith(".jsonl"):
+                    summary_path = self.truncation_log_path[:-6] + ".summary.json"
+                else:
+                    summary_path = self.truncation_log_path + ".summary.json"
+            if summary_path:
+                with open(summary_path, "w") as _fp:
+                    json.dump(summary, _fp)
+        except Exception:
+            pass
+
+        # Best-effort generation length logging and summary
+        try:
+            if self.genlen_records:
+                if self.genlen_log_path:
+                    with open(self.genlen_log_path, "a") as _fp:
+                        for _rec in self.genlen_records:
+                            _fp.write(json.dumps(_rec, ensure_ascii=False) + "\n")
+
+                # Compute summary stats on effective generated tokens
+                vals = [int(r["gen_tokens_eff"]) for r in self.genlen_records if isinstance(r.get("gen_tokens_eff"), (int, float, str))]
+                vals = [int(v) for v in vals]
+                if vals:
+                    summary = {
+                        "task": self.current_task_name,
+                        "count": len(vals),
+                        "min": int(min(vals)),
+                        "max": int(max(vals)),
+                        "avg": float(sum(vals) / len(vals)),
+                    }
+                    # Decide summary path
+                    summary_path = self.genlen_summary_path
+                    if not summary_path and self.genlen_log_path:
+                        if self.genlen_log_path.endswith(".jsonl"):
+                            summary_path = self.genlen_log_path[:-6] + ".summary.json"
+                        else:
+                            summary_path = self.genlen_log_path + ".summary.json"
+                    if summary_path:
+                        with open(summary_path, "w") as _fp:
+                            json.dump(summary, _fp)
+                # Clear records after writing
+                self.genlen_records = []
         except Exception:
             pass
 

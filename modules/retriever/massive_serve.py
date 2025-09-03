@@ -2,28 +2,29 @@ import requests
 import json
 
 class MassiveServeRetriever:
-    def __init__(self, api_url, k=10, use_rerank=False, use_diverse=False, n_probe=None, retrieval_batch_size=1):
+    def __init__(self, api_url, k=10, use_rerank=False, use_diverse=False, n_probe=None, retrieval_batch_size=1, lambda_val=None):
         self.api_url = api_url
         self.k = k
         self.use_rerank = use_rerank
         self.use_diverse = use_diverse
         self.n_probe = n_probe
         self.retrieval_batch_size = retrieval_batch_size
+        self.lambda_val = lambda_val
         self.batched_results = None  # to be populated if batch retrieval is used
 
     def retrieve(self, query):
         if self.retrieval_batch_size == 1:
             print("[Retriever] Using per-query retrieval")
-            response = requests.post(
-                self.api_url,
-                json={
-                    "query": query,
-                    "n_docs": self.k,
-                    "exact_search": self.use_rerank,
-                    "diverse_search": self.use_diverse,
-                    "nprobe": self.n_probe,
-                },
-            )
+            payload = {
+                "query": query,
+                "n_docs": self.k,
+                "exact_search": self.use_rerank,
+                "diverse_search": self.use_diverse,
+                "nprobe": self.n_probe,
+            }
+            if self.lambda_val is not None:
+                payload["lambda"] = self.lambda_val
+            response = requests.post(self.api_url, json=payload)
             response.raise_for_status()
             return response.json()
         else:
@@ -36,16 +37,16 @@ class MassiveServeRetriever:
         for i in range(0, len(queries), self.retrieval_batch_size):
             subqueries = queries[i: i + self.retrieval_batch_size]
             try:
-                response = requests.post(
-                    self.api_url,
-                    json={
-                        "queries": subqueries,
-                        "n_docs": self.k,
-                        "exact_search": self.use_rerank,
-                        "diverse_search": self.use_diverse,
-                        "nprobe": self.n_probe,
-                    },
-                )
+                payload = {
+                    "queries": subqueries,
+                    "n_docs": self.k,
+                    "exact_search": self.use_rerank,
+                    "diverse_search": self.use_diverse,
+                    "nprobe": self.n_probe,
+                }
+                if self.lambda_val is not None:
+                    payload["lambda"] = self.lambda_val
+                response = requests.post(self.api_url, json=payload)
                 response.raise_for_status()
             except requests.exceptions.RequestException as e:
                 print("[ERROR] Backend request failed")

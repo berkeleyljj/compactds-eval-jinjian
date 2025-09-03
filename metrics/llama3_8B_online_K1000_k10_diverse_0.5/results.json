@@ -1,0 +1,10 @@
+{
+    "MMLU Pro": 0.47214285714285714,
+    "AGI Eval": 0.57125,
+    "GPQA": 0.3482142857142857,
+    "GPQA:Biology": 0.48717948717948717,
+    "GPQA:Physics": 0.3315508021390374,
+    "GPQA:Chemistry": 0.30601092896174864,
+    "Average w/o subcat": 0.4638690476190477,
+    "Average with subcat": 0.43362681508462614
+}

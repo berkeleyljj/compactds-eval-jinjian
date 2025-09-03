@@ -56,16 +56,16 @@ from oe_eval.truncate import truncate_long_contexts
 from src.config import ExperimentConfig
 from modules.retriever.offline_retrieval import OfflineRetrieval
 
-# To run "hf-oldstyle" OLMo models
+# To run "hf-oldstyle" OLMo models (optional; don't fail hard if unavailable/misconfigured)
 try:
     from hf_olmo import *  # noqa: F403
-except ImportError:
+except Exception:
     pass
 
-# For running e.g. https://huggingface.co/TRI-ML/DCLM-1B
+# For running e.g. https://huggingface.co/TRI-ML/DCLM-1B (optional)
 try:
     from open_lm.hf import *  # noqa: F403
-except ImportError:
+except Exception:
     pass
 
 logger = logging.getLogger()
@@ -181,6 +181,12 @@ _parser.add_argument(
     action='store_true',
     default=False,
     help="Whether or not to use diverse search"
+)
+_parser.add_argument(
+    "--lambda_val",
+    type=float,
+    default=None,
+    help="Lambda for diversification/mixture at retrieval time"
 )
 _parser.add_argument(
     "--massive_serve_api",
@@ -668,6 +674,7 @@ def process_eval_args(args_dict: dict) -> dict:
     exact_search = args_dict.pop("exact_search", False)
     diverse_search = args_dict.pop("diverse_search", False)
     n_probe = args_dict.pop("n_probe", None)
+    lambda_val = args_dict.pop("lambda_val", None)
 
     if compute_config["remote_output_dir"] is not None:
         # if a remote directory is provided, we set the output dir to a temporary directory
@@ -685,7 +692,8 @@ def process_eval_args(args_dict: dict) -> dict:
         "exact_search": exact_search,
         "diverse_search": diverse_search,
         "n_probe": n_probe,
-        "retrieval_batch_size": retrieval_batch_size
+        "retrieval_batch_size": retrieval_batch_size,
+        "lambda_val": lambda_val
     }
     return eval_config
 
@@ -816,6 +824,7 @@ def run_eval(args_dict: dict):
     exact_search = eval_config.get("exact_search", False)
     diverse_search = eval_config.get("diverse_search", False)
     n_probe = eval_config.get("n_probe", None)
+    lambda_val = eval_config.get("lambda_val", None)
     print(f"Exact search is set to {exact_search}")
     print(f"Diverse search is set to {diverse_search}")
 
@@ -827,7 +836,8 @@ def run_eval(args_dict: dict):
             use_rerank = exact_search,
             use_diverse = diverse_search,
             n_probe = n_probe,
-            retrieval_batch_size = eval_config["retrieval_batch_size"]
+            retrieval_batch_size = eval_config["retrieval_batch_size"],
+            lambda_val = lambda_val
         )
         _log_mem("run_eval:serve_retriever_initialized")
     elif retrieval_config is not None and retrieval_config['offline_retrieval_config']:
@@ -1036,11 +1046,31 @@ def run_eval(args_dict: dict):
             # Truncate outliers (in-place) to protect batching
             truncate_long_contexts(
                 task_instances,
-                target_cap=14_000,
+                target_cap=13_000,
                 eval_model=eval_model,
                 model_config=model_config,
                 verbose=True,
             )
+            # Auto-configure per-task logging paths for generation lengths and truncations
+            try:
+                if output_dir is not None and eval_model is not None:
+                    # Derive stable, per-task filepaths in the output directory
+                    genlen_log = task_file_name(output_dir, task_idx, task_name, "genlen.jsonl")
+                    genlen_summary = task_file_name(output_dir, task_idx, task_name, "genlen.summary.json")
+                    trunc_log = task_file_name(output_dir, task_idx, task_name, "truncation.jsonl")
+                    trunc_summary = task_file_name(output_dir, task_idx, task_name, "truncation.summary.json")
+                    # Ensure directories exist (task_file_name returns file path within output_dir)
+                    os.makedirs(os.path.dirname(genlen_log), exist_ok=True)
+                    # Wire into model if it supports verbose logging attributes
+                    if hasattr(eval_model, "genlen_log_path"):
+                        setattr(eval_model, "current_task_name", task_name)
+                        setattr(eval_model, "genlen_log_path", genlen_log)
+                        setattr(eval_model, "genlen_summary_path", genlen_summary)
+                    if hasattr(eval_model, "truncation_log_path"):
+                        setattr(eval_model, "truncation_log_path", trunc_log)
+                        setattr(eval_model, "truncation_summary_path", trunc_summary)
+            except Exception:
+                pass
             # Log requests associated with first instance
             results_for_requests = evaluate(model=eval_model, instances=task._instances)
         # Post-process generation results for metrics
