@@ -1,3 +1,2 @@
-,index,AGI Eval,GPQA,GPQA:Biology,GPQA:Physics,GPQA:Chemistry,Average w/o subcat,Average with subcat
-0,llama-8B-agi-k=10-diskann-online-L150-W8-T8,0.5662499999999999,,,,,0.5662499999999999,0.5662499999999999
-1,llama-8B-gpqa-k=10-diskann-online-L2000-W8-T8,,0.3125,0.4358974358974359,0.3155080213903743,0.2568306010928962,0.3125,0.3360786861269021
+,index,AGI Eval,Average w/o subcat,Average with subcat
+0,llama-8B-agi-k=10-ann-online,0.57625,0.57625,0.57625

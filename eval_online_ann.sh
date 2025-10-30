@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./eval_online_ann.sh
-#   K=10 BATCH=100 API_URL=http://128.208.4.44:30888/search ./eval_online_ann.sh
+#   K=10 BATCH=100 API_URL=http://api.ds-serve.org:30888/search ./eval_online_ann.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -29,7 +29,7 @@ API_URL="${API_URL:-http://api.ds-serve.org:30888/search}"
 # ANN can use larger batch safely
 BATCH="${BATCH:-100}"
 
-OUT_DIR="output/llama-8B-agi-k=${K}-ann-online"
+OUT_DIR="output/llama-8B-agi-k=${K}-ann-online-GH200"
 
 echo "[Eval] Online AGI Eval (ANN only)"
 echo "[Eval] Task=$TASK  K=$K  Batch=$BATCH  API=$API_URL"
