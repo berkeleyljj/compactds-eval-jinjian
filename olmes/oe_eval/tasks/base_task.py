@@ -365,10 +365,32 @@ class Task(abc.ABC):
                 serve_retriever.batched_results = None
 
         elif offline_retriever is not None:
-            docs = [
-                d for d in docs
-                if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc
-            ]
+            # Accept multiple key shapes so external retrieval files don't need
+            # to construct alias-qualified IDs. This does not affect accuracy;
+            # it only broadens matching to existing results.
+            nid_field = self.task_config.get('native_id_field', 'id')
+            alias = self.task_config['metadata']['alias']
+            base_alias = alias.split('::')[0] if isinstance(alias, str) else alias
+            q2d = offline_retriever.query_to_doc
+
+            def _has_key(d):
+                qid = d.get(nid_field)
+                qid_str = str(qid)
+                if qid in q2d or qid_str in q2d:
+                    return True
+                # String composite keys that some retrievers generate
+                # 1) alias:index
+                k1 = f"{alias}:{qid}"
+                k1b = f"{alias}:{qid_str}"
+                # 2) base_alias:index
+                k2 = f"{base_alias}:{qid}"
+                k2b = f"{base_alias}:{qid_str}"
+                # 3) base_alias::retrieval:index
+                k3 = f"{base_alias}::retrieval:{qid}"
+                k3b = f"{base_alias}::retrieval:{qid_str}"
+                return (k1 in q2d) or (k1b in q2d) or (k2 in q2d) or (k2b in q2d) or (k3 in q2d) or (k3b in q2d)
+
+            docs = [d for d in docs if _has_key(d)]
 
 
         for doc_id, doc in enumerate(docs):
@@ -512,9 +534,25 @@ class Task(abc.ABC):
             texts = [p["text"] for p in ctxs["results"]["passages"]]
             retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(texts)
         elif offline_retriever is not None:
-            ctxs = offline_retriever.retrieve_single(
-                doc, key=f"{self.task_config['metadata']['alias']}:{doc[self.task_config.get('native_id_field', 'id')]}"
-            )
+            nid_field = self.task_config.get('native_id_field', 'id')
+            alias = self.task_config['metadata']['alias']
+            base_alias = alias.split('::')[0] if isinstance(alias, str) else alias
+            qid = doc.get(nid_field)
+            qid_str = str(qid)
+
+            candidate_keys = [
+                f"{alias}:{qid}", f"{alias}:{qid_str}",
+                f"{base_alias}:{qid}", f"{base_alias}:{qid_str}",
+                f"{base_alias}::retrieval:{qid}", f"{base_alias}::retrieval:{qid_str}"
+            ]
+            ctxs = None
+            for key in candidate_keys:
+                if key in offline_retriever.query_to_doc:
+                    ctxs = offline_retriever.retrieve_single(doc, key=key)
+                    break
+            if ctxs is None:
+                # Fallback to native matching_key lookup
+                ctxs = offline_retriever.retrieve_single(doc)
             assert ctxs is not None
             if "{query}" not in description:
                 retrieval_text = retrieval_prefix + self._prepare_retrieved_passages(ctxs)
@@ -701,10 +739,22 @@ class MultipleChoiceTask(Task):
                 serve_retriever.batched_results = None
 
         elif offline_retriever is not None:
-            docs = [
-                d for d in docs
-                if f"{self.task_config['metadata']['alias']}:{d[self.task_config.get('native_id_field', 'id')]}" in offline_retriever.query_to_doc
-            ]
+            nid_field = self.task_config.get('native_id_field', 'id')
+            alias = self.task_config['metadata']['alias']
+            base_alias = alias.split('::')[0] if isinstance(alias, str) else alias
+            q2d = offline_retriever.query_to_doc
+
+            def _has_key(d):
+                qid = d.get(nid_field)
+                qid_str = str(qid)
+                if qid in q2d or qid_str in q2d:
+                    return True
+                k1 = f"{alias}:{qid}";    k1b = f"{alias}:{qid_str}"
+                k2 = f"{base_alias}:{qid}"; k2b = f"{base_alias}:{qid_str}"
+                k3 = f"{base_alias}::retrieval:{qid}"; k3b = f"{base_alias}::retrieval:{qid_str}"
+                return (k1 in q2d) or (k1b in q2d) or (k2 in q2d) or (k2b in q2d) or (k3 in q2d) or (k3b in q2d)
+
+            docs = [d for d in docs if _has_key(d)]
 
 
 
