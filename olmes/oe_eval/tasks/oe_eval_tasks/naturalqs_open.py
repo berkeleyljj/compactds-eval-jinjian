@@ -18,8 +18,7 @@ from itertools import islice
 from typing import List, Union
 
 from oe_eval.components.instances import RequestInstance
-from oe_eval.dependencies.drop.process_results import process_results
-from oe_eval.metrics.metric import GenericMetric
+from oe_eval.metrics.metric import SQuADF1EMRecallMetric
 from oe_eval.tasks.base_task import Task
 from oe_eval.tasks.utils import map_indexed
 
@@ -57,13 +56,8 @@ class NaturalQsOpen(Task):
     }
 
     def make_metrics(self):
-        self._metrics = [
-            GenericMetric(
-                process_results_fn=process_results,
-                metric_names=["f1", "exact_match"],
-                **self.task_config["metric_kwargs"],
-            )
-        ]
+        # Align with TriviaQA: report exact_match, f1, and recall (string-inclusion of any gold answer)
+        self._metrics = [SQuADF1EMRecallMetric(**self.task_config["metric_kwargs"])]
         return self._metrics
 
     def has_training_docs(self):
