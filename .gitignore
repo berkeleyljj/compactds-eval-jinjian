@@ -1,5 +1,4 @@
 cache
-output
 data
 */data
 **/__pycache__
@@ -13,3 +12,7 @@ data
 */*/*/__pycache__
 */*/*/*/__pycache__
 .pyc
+
+# Ensure evaluation outputs are tracked
+!output/
+!output/**
