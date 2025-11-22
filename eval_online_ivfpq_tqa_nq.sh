@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Online TriviaQA + Natural Questions (Massive-Serve API) - DiskANN
+# Online TriviaQA + Natural Questions (Massive-Serve API) - IVFPQ
 # Usage:
-#   ./eval_online_diskann_tqa_nq.sh
-#   K=10 L=2000 W=4 THREADS=128 BATCH=100 API_URL=http://api.ds-serve.org:30888/search ./eval_online_diskann_tqa_nq.sh
+#   ./eval_online_ivfpq_tqa_nq.sh
+#   K=10 NPROBE=256 BATCH=100 API_URL=http://api.ds-serve.org:30888/search ./eval_online_ivfpq_tqa_nq.sh
 #
 # Notes:
-# - This script mirrors eval_online_diskann.sh but targets TriviaQA and NQ.
-# - DiskANN parameters are passed to the server via env → client payload.
+# - Mirrors eval_online_diskann_tqa_nq.sh but targets IVFPQ with configurable nprobe.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -29,21 +28,16 @@ BATCH="${BATCH:-100}"
 SEED="${SEED:-2025}"
 API_URL="${API_URL:-http://api.ds-serve.org:30888/search}"
 
-# DiskANN params (defaults align with your preference)
-L="${L:-5000}"
-W="${W:-4}"
-THREADS="${THREADS:-64}"
+# IVFPQ param
+NPROBE="${NPROBE:-256}"
 
-OUT_DIR="output/llama-8B-tqa_nq-k=${K}-diskann-online-L${L}-W${W}-T${THREADS}"
+OUT_DIR="output/llama-8B-tqa_nq-k=${K}-ivfpq-online-nprobe${NPROBE}"
 
-# Tell retriever to use DiskANN and pass params
-export MS_BACKEND=diskann
-export DISKANN_L="$L"
-export DISKANN_W="$W"
-export DISKANN_THREADS="$THREADS"
+# Tell retriever to use IVFPQ
+export MS_BACKEND=ivfpq
 
-echo "[Eval] Online TriviaQA + NQ (DiskANN)"
-echo "[Eval] Tasks=${TASKS[*]}  K=$K  Batch=$BATCH  API=$API_URL  L=$L W=$W T=$THREADS"
+echo "[Eval] Online TriviaQA + NQ (IVFPQ)"
+echo "[Eval] Tasks=${TASKS[*]}  K=$K  Batch=$BATCH  API=$API_URL  nprobe=$NPROBE"
 
 python olmes/oe_eval/run_eval.py \
   --task "${TASKS[@]}" \
@@ -53,6 +47,7 @@ python olmes/oe_eval/run_eval.py \
   --k "$K" \
   --massive_serve_api "$API_URL" \
   --retrieval_batch_size "$BATCH" \
+  --n_probe "$NPROBE" \
   --save-raw-requests true \
   --output-dir "$OUT_DIR" \
   --random-subsample-seed "$SEED"
