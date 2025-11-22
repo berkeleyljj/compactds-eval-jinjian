@@ -15,4 +15,4 @@ data
 
 # Ensure evaluation outputs are tracked
 !output/
-!output/**
+!output/**output/**/task-*-requests.jsonl
